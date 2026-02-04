@@ -73,6 +73,7 @@ pub struct KeyImage {
     pub url: String,
     #[serde(rename = "type")]
     pub image_type: String,
+    pub md5: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -92,6 +93,31 @@ pub struct LocalGameMetadata {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LocalMetadataDetails {
+    pub developer: Option<String>,
     #[serde(rename = "keyImages")]
     pub key_images: Vec<KeyImage>,
+    #[serde(rename = "dlcItemList")]
+    pub dlc_item_list: Option<Vec<DlcItem>>,
+    #[serde(rename = "customAttributes")]
+    pub custom_attributes: Option<std::collections::HashMap<String, CustomAttribute>>,
+    #[serde(rename = "releaseInfo")]
+    pub release_info: Option<Vec<ReleaseInfo>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DlcItem {
+    pub title: String,
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CustomAttribute {
+    pub value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReleaseInfo {
+    #[serde(rename = "appId")]
+    pub app_id: String,
+    pub platform: Vec<String>,
 }

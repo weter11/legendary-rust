@@ -18,7 +18,8 @@ pub struct LegendaryApp {
     installed_games: Vec<InstalledGame>,
     assets: Vec<Asset>,
     selected_game: Option<GameInfo>,
-    images: HashMap<String, egui_extras::RetainedImage>,
+    selected_app_name: Option<String>,
+    images: HashMap<(String, String), egui_extras::RetainedImage>, // (app_name, type)
     auth_code: String,
     status_message: String,
     current_view: View,
@@ -31,7 +32,12 @@ enum WorkerMsg {
     RefreshLibrary,
     FetchGameInfo(String, String), // namespace, catalog_item_id
     FetchAssets,
-    FetchImage(String, String, bool), // app_name, url, is_installed
+    FetchImage {
+        app_name: String,
+        url: String,
+        is_installed: bool,
+        image_type: String,
+    },
     Logout,
 }
 
@@ -40,7 +46,11 @@ enum WorkerResponse {
     LibraryFetched(Vec<LibraryItem>),
     GameInfoFetched(GameInfo),
     AssetsFetched(Vec<Asset>),
-    ImageFetched(String, egui::ColorImage),
+    ImageFetched {
+        app_name: String,
+        image_type: String,
+        image: egui::ColorImage,
+    },
     Error(String),
 }
 
@@ -56,6 +66,23 @@ fn color_to_grayscale(pixels: &mut [egui::Color32]) {
         let gray = (pixel.r() as f32 * 0.299 + pixel.g() as f32 * 0.587 + pixel.b() as f32 * 0.114) as u8;
         *pixel = egui::Color32::from_rgba_unmultiplied(gray, gray, gray, pixel.a());
     }
+}
+
+
+use sha2::{Sha256, Digest};
+
+fn get_cache_path(url: &str) -> Option<std::path::PathBuf> {
+    let mut p = crate::auth::get_config_dir()?;
+    p.push("cache");
+    let _ = std::fs::create_dir_all(&p);
+
+    let mut hasher = Sha256::new();
+    hasher.update(url.as_bytes());
+    let result = hasher.finalize();
+    let filename = format!("{:x}.img", result);
+
+    p.push(filename);
+    Some(p)
 }
 
 impl LegendaryApp {
@@ -115,33 +142,48 @@ impl LegendaryApp {
                             Err(e) => { let _ = tx.send(WorkerResponse::Error(e.to_string())); }
                         }
                     }
-                    WorkerMsg::FetchImage(app_name, url, is_installed) => {
-                        match reqwest::blocking::get(url) {
-                            Ok(res) => {
+                    WorkerMsg::FetchImage { app_name, url, is_installed, image_type } => {
+                        let cache_path = get_cache_path(&url);
+                        let mut image_bytes = None;
+
+                        if let Some(ref path) = cache_path {
+                            if let Ok(bytes) = std::fs::read(path) {
+                                image_bytes = Some(bytes);
+                            }
+                        }
+
+                        if image_bytes.is_none() {
+                            if let Ok(res) = reqwest::blocking::get(&url) {
                                 if let Ok(bytes) = res.bytes() {
-                                    if let Ok(img) = image::load_from_memory(&bytes) {
-                                        let size = [img.width() as _, img.height() as _];
-                                        let pixels = img.to_rgba8();
-                                        let pixels: Vec<egui::Color32> = pixels
-                                            .chunks_exact(4)
-                                            .map(|p| egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
-                                            .collect();
-
-                                        let mut color_image = egui::ColorImage {
-                                            size,
-                                            pixels,
-                                        };
-
-                                        if !is_installed {
-                                            color_to_grayscale(&mut color_image.pixels);
-                                        }
-
-                                        let _ = tx.send(WorkerResponse::ImageFetched(app_name, color_image));
-                                        ctx_clone.request_repaint();
+                                    if let Some(ref path) = cache_path {
+                                        let _ = std::fs::write(path, &bytes);
                                     }
+                                    image_bytes = Some(bytes.to_vec());
                                 }
                             }
-                            Err(_) => {}
+                        }
+
+                        if let Some(bytes) = image_bytes {
+                            if let Ok(img) = image::load_from_memory(&bytes) {
+                                let size = [img.width() as _, img.height() as _];
+                                let pixels = img.to_rgba8();
+                                let pixels: Vec<egui::Color32> = pixels
+                                    .chunks_exact(4)
+                                    .map(|p| egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
+                                    .collect();
+
+                                let mut color_image = egui::ColorImage {
+                                    size,
+                                    pixels,
+                                };
+
+                                if !is_installed {
+                                    color_to_grayscale(&mut color_image.pixels);
+                                }
+
+                                let _ = tx.send(WorkerResponse::ImageFetched { app_name, image_type, image: color_image });
+                                ctx_clone.request_repaint();
+                            }
                         }
                     }
                     WorkerMsg::RefreshLibrary => {
@@ -188,6 +230,7 @@ impl LegendaryApp {
             installed_games: crate::auth::load_installed_games(),
             assets: Vec::new(),
             selected_game: None,
+            selected_app_name: None,
             images: HashMap::new(),
             auth_code: String::new(),
             status_message: "Welcome to Legendary Rust".to_string(),
@@ -217,9 +260,9 @@ impl eframe::App for LegendaryApp {
                 WorkerResponse::AssetsFetched(assets) => {
                     self.assets = assets;
                 }
-                WorkerResponse::ImageFetched(app_name, image) => {
-                    let name = format!("{}_art", app_name);
-                    self.images.insert(app_name, egui_extras::RetainedImage::from_color_image(name, image));
+                WorkerResponse::ImageFetched { app_name, image_type, image } => {
+                    let name = format!("{}_{}", app_name, image_type);
+                    self.images.insert((app_name, image_type), egui_extras::RetainedImage::from_color_image(name, image));
                 }
                 WorkerResponse::Error(e) => {
                     self.status_message = format!("Error: {}", e);
@@ -324,17 +367,22 @@ impl LegendaryApp {
 
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
-                            if let Some(img) = self.images.get(&item.app_name) {
-                                let size = img.size_vec2();
-                                let ratio = size.x / size.y;
-                                img.show_max_size(ui, egui::vec2(100.0 * ratio, 100.0));
-                            } else {
-                                // Trigger fetch if not present
-                                if let Some(meta) = local_meta {
-                                    if let Some(first_img) = meta.metadata.key_images.get(0) {
-                                        let _ = self.tx.send(WorkerMsg::FetchImage(item.app_name.clone(), first_img.url.clone(), is_installed));
-                                    }
+                            let first_img_info = local_meta.as_ref().and_then(|m| m.metadata.key_images.get(0));
+                            if let Some(info) = first_img_info {
+                                if let Some(img) = self.images.get(&(item.app_name.clone(), info.image_type.clone())) {
+                                    let size = img.size_vec2();
+                                    let ratio = size.x / size.y;
+                                    img.show_max_size(ui, egui::vec2(100.0 * ratio, 100.0));
+                                } else {
+                                    let _ = self.tx.send(WorkerMsg::FetchImage {
+                                        app_name: item.app_name.clone(),
+                                        url: info.url.clone(),
+                                        is_installed,
+                                        image_type: info.image_type.clone(),
+                                    });
+                                    ui.allocate_space(egui::vec2(70.0, 100.0));
                                 }
+                            } else {
                                 ui.allocate_space(egui::vec2(70.0, 100.0));
                             }
 
@@ -344,6 +392,7 @@ impl LegendaryApp {
                                         ui.label("✅");
                                     }
                                     if ui.button(egui::RichText::new(title).strong().size(18.0)).clicked() {
+                                        self.selected_app_name = Some(item.app_name.clone());
                                         let _ = self.tx.send(WorkerMsg::FetchAssets);
                                         let _ = self.tx.send(WorkerMsg::FetchGameInfo(item.namespace.clone(), item.catalog_item_id.clone()));
                                         self.status_message = "Fetching game info...".to_string();
@@ -361,57 +410,129 @@ impl LegendaryApp {
 
     fn show_game_detail_view(&mut self, ui: &mut egui::Ui) {
         if let Some(game) = &self.selected_game {
+            let app_name = self.selected_app_name.as_ref().cloned().unwrap_or_else(|| game.id.clone());
+            let local_meta = crate::auth::load_local_metadata(&app_name);
+
             if ui.button("Back").clicked() {
                 self.current_view = View::Library;
             }
-            ui.heading(&game.title);
 
-            if let Some(asset) = self.assets.iter().find(|a| a.catalog_item_id == game.id) {
-                ui.label(format!("Version: {}", asset.build_version));
-                ui.label(format!("App Name: {}", asset.app_name));
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Second album art (DieselGameBoxTall or index 1)
+                    if let Some(meta) = &local_meta {
+                        let img_info = meta.metadata.key_images.iter().find(|i| i.image_type == "DieselGameBoxTall")
+                            .or_else(|| meta.metadata.key_images.get(1));
 
-                if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == asset.app_name) {
-                    ui.label(format!("Installed at: {}", installed.install_path));
-                }
-            }
+                        if let Some(info) = img_info {
+                            if let Some(img) = self.images.get(&(app_name.clone(), info.image_type.clone())) {
+                                let size = img.size_vec2();
+                                let ratio = size.x / size.y;
+                                img.show_max_size(ui, egui::vec2(200.0 * ratio, 200.0));
+                            } else {
+                                let _ = self.tx.send(WorkerMsg::FetchImage {
+                                    app_name: app_name.clone(),
+                                    url: info.url.clone(),
+                                    is_installed: true,
+                                    image_type: info.image_type.clone(),
+                                });
+                                ui.allocate_space(egui::vec2(150.0, 200.0));
+                            }
+                        }
+                    }
 
-            ui.label(format!("ID: {}", game.id));
-            ui.label(format!("Namespace: {}", game.namespace));
-            if let Some(desc) = &game.description {
-                ui.label(desc);
-            }
+                    ui.vertical(|ui| {
+                        ui.heading(&game.title);
+                        if let Some(meta) = &local_meta {
+                            if let Some(dev) = &meta.metadata.developer {
+                                ui.label(egui::RichText::new(format!("Developer: {}", dev)).italics());
+                            }
+                        }
+                        ui.label(format!("Application Name: {}", app_name));
 
-            ui.separator();
+                        if let Some(asset) = self.assets.iter().find(|a| a.catalog_item_id == game.id) {
+                            ui.label(format!("Version: {}", asset.build_version));
+                        }
 
-            ui.horizontal(|ui| {
-                if ui.button("Install").clicked() {
-                    self.status_message = "Install not implemented yet".to_string();
-                }
-                if ui.button("Launch").clicked() {
-                    if let Some(asset) = self.assets.iter().find(|a| a.catalog_item_id == game.id) {
-                        if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == asset.app_name) {
-                            let path = std::path::PathBuf::from(&installed.install_path);
-                            // Very simplified: look for an .exe or the app_name as binary
-                            let mut found = false;
-                            for ext in &["exe", "sh", ""] {
-                                let exe_path = path.join(format!("{}.{}", asset.app_name, ext));
-                                if exe_path.exists() {
-                                    self.status_message = format!("Launching: {:?}", exe_path);
-                                    let _ = std::process::Command::new(exe_path).spawn();
-                                    found = true;
-                                    break;
+                        if let Some(meta) = &local_meta {
+                            if let Some(attrs) = &meta.metadata.custom_attributes {
+                                if let Some(size) = attrs.get("MaxSizeMB") {
+                                    ui.label(format!("Installation Size: {} MB", size.value));
                                 }
                             }
-                            if !found {
-                                self.status_message = format!("Could not find executable in {}", installed.install_path);
+                            if let Some(release_info) = &meta.metadata.release_info {
+                                let platforms: Vec<_> = release_info.iter().flat_map(|r| &r.platform).collect();
+                                ui.label(format!("Platform: {:?}", platforms));
                             }
-                        } else {
-                            self.status_message = "Game not installed according to Legendary config".to_string();
                         }
-                    } else {
-                        self.status_message = "Launch failed: app name not found".to_string();
+
+                        if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == app_name) {
+                            ui.label(format!("Installed at: {}", installed.install_path));
+                        }
+                    });
+                });
+
+                if let Some(meta) = &local_meta {
+                    if let Some(dlcs) = &meta.metadata.dlc_item_list {
+                        if !dlcs.is_empty() {
+                            ui.add_space(10.0);
+                            ui.collapsing("DLCs", |ui| {
+                                for dlc in dlcs {
+                                    ui.label(&dlc.title);
+                                }
+                            });
+                        }
                     }
                 }
+
+                ui.separator();
+                if let Some(desc) = &game.description {
+                    ui.label(desc);
+                }
+
+                ui.add_space(20.0);
+                ui.horizontal(|ui| {
+                    if ui.button(egui::RichText::new("Start Game").size(24.0).strong()).clicked() {
+                        if let Some(asset) = self.assets.iter().find(|a| a.catalog_item_id == game.id) {
+                            if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == asset.app_name) {
+                                let path = std::path::PathBuf::from(&installed.install_path);
+                                let mut found = false;
+                                let mut possible_names = vec![asset.app_name.clone()];
+                                if let Some(meta) = &local_meta {
+                                    if let Some(attrs) = &meta.metadata.custom_attributes {
+                                        if let Some(folder) = attrs.get("FolderName") {
+                                            possible_names.push(folder.value.clone());
+                                        }
+                                    }
+                                }
+
+                                'search: for name in possible_names {
+                                    for ext in &["exe", "sh", ""] {
+                                        let filename = if ext.is_empty() { name.clone() } else { format!("{}.{}", name, ext) };
+                                        let exe_path = path.join(filename);
+                                        if exe_path.exists() {
+                                            self.status_message = format!("Launching: {:?}", exe_path);
+                                            let _ = std::process::Command::new(exe_path).spawn();
+                                            found = true;
+                                            break 'search;
+                                        }
+                                    }
+                                }
+                                if !found {
+                                    self.status_message = format!("Could not find executable in {}", installed.install_path);
+                                }
+                            } else {
+                                self.status_message = "Game not installed according to Legendary config".to_string();
+                            }
+                        } else {
+                            self.status_message = "Launch failed: app name not found".to_string();
+                        }
+                    }
+
+                    if ui.button("Install").clicked() {
+                        self.status_message = "Install not implemented yet".to_string();
+                    }
+                });
             });
         }
     }
