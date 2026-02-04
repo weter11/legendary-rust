@@ -1,0 +1,40 @@
+#[cfg(test)]
+mod tests {
+    use crate::models::*;
+
+    #[test]
+    fn test_library_item_deserialization() {
+        let json = r#"{
+            "app_name": "Anemone",
+            "catalog_item_id": "item_id",
+            "namespace": "ns",
+            "metadata": {
+                "title": "World of Goo"
+            }
+        }"#;
+        let item: LibraryItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.app_name, "Anemone");
+        assert_eq!(item.metadata.unwrap().get("title").unwrap().as_str().unwrap(), "World of Goo");
+    }
+
+    #[test]
+    fn test_oauth_token_deserialization() {
+        let json = r#"{
+            "access_token": "abc",
+            "expires_in": 3600,
+            "expires_at": "2023-01-01T00:00:00Z",
+            "token_type": "bearer",
+            "account_id": "acc_id",
+            "client_id": "cli_id",
+            "internal_client": true,
+            "client_service": "service",
+            "displayName": "User",
+            "app": "app",
+            "in_app_id": "in_app",
+            "device_id": "dev_id"
+        }"#;
+        let token: OAuthToken = serde_json::from_str(json).unwrap();
+        assert_eq!(token.access_token, "abc");
+        assert_eq!(token.display_name.unwrap(), "User");
+    }
+}
