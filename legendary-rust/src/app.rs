@@ -70,10 +70,12 @@ enum WorkerMsg {
         app_name: String,
         install_path: std::path::PathBuf,
     },
+    UninstallGame(String),
     ScanGames {
         library: Vec<LibraryItem>,
         search_paths: Vec<std::path::PathBuf>,
     },
+    FetchGameToken(String),
 }
 
 enum WorkerResponse {
@@ -92,6 +94,10 @@ enum WorkerResponse {
     CloudSyncConflict(String, Vec<crate::models::CloudSaveFile>),
     InstallInfoFetched(crate::models::InstallInfo),
     GamesScanned(Vec<InstalledGame>),
+    GameTokenFetched {
+        app_name: String,
+        token: String,
+    },
 }
 
 #[derive(PartialEq)]
@@ -424,6 +430,23 @@ impl LegendaryApp {
                             let _ = tx.send(WorkerResponse::TaskProgress(format!("Downloading {}", app_name), i as f32 / 10.0));
                         }
                         let _ = tx.send(WorkerResponse::TaskFinished(format!("Installation of {} complete", app_name)));
+
+                        // Re-fetch installed games after installation
+                        let installed = crate::auth::load_installed_games();
+                        let _ = tx.send(WorkerResponse::GamesScanned(installed));
+
+                        ctx_clone.request_repaint();
+                    }
+                    WorkerMsg::UninstallGame(app_name) => {
+                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Uninstalling {}", app_name), 0.0));
+
+                        let mut installed = crate::auth::load_installed_games();
+                        installed.retain(|g| g.app_name != app_name);
+                        let _ = crate::auth::save_installed_games(&installed);
+
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let _ = tx.send(WorkerResponse::GamesScanned(installed));
+                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Uninstalled {}", app_name)));
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::ScanGames { library, search_paths } => {
@@ -431,6 +454,17 @@ impl LegendaryApp {
                         let installed = crate::auth::scan_and_import_games(&library, &search_paths);
                         let _ = tx.send(WorkerResponse::GamesScanned(installed));
                         let _ = tx.send(WorkerResponse::TaskFinished("Scan complete".to_string()));
+                        ctx_clone.request_repaint();
+                    }
+                    WorkerMsg::FetchGameToken(app_name) => {
+                        match client.get_game_token() {
+                            Ok(token) => {
+                                let _ = tx.send(WorkerResponse::GameTokenFetched { app_name, token });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(WorkerResponse::Error(format!("Failed to fetch game token: {}", e)));
+                            }
+                        }
                         ctx_clone.request_repaint();
                     }
                 }
@@ -509,7 +543,25 @@ impl eframe::App for LegendaryApp {
                     self.current_view = View::InstallDialog;
                 }
                 WorkerResponse::GamesScanned(games) => {
+                    // Check for changes in installation status to refresh images
+                    for item in &self.library {
+                        let was_installed = self.installed_games.iter().any(|g| g.app_name == item.app_name);
+                        let is_now_installed = games.iter().any(|g| g.app_name == item.app_name);
+
+                        if was_installed != is_now_installed {
+                            let local_meta = crate::auth::load_local_metadata(&item.app_name);
+                            if let Some(meta) = local_meta {
+                                for img_info in &meta.metadata.key_images {
+                                    self.images.remove(&(item.app_name.clone(), img_info.image_type.clone()));
+                                    self.fetching_images.remove(&(item.app_name.clone(), img_info.image_type.clone()));
+                                }
+                            }
+                        }
+                    }
                     self.installed_games = games;
+                }
+                WorkerResponse::GameTokenFetched { app_name, token } => {
+                    self.launch_game_with_token(app_name, token);
                 }
             }
         }
@@ -678,9 +730,123 @@ impl LegendaryApp {
         });
     }
 
+    fn launch_game_with_token(&mut self, app_name: String, token: String) {
+        let installed = self.installed_games.iter().find(|g| g.app_name == app_name).cloned();
+        if let Some(installed) = installed {
+            let local_meta = crate::auth::load_local_metadata(&app_name);
+            let path = std::path::PathBuf::from(&installed.install_path);
+            let mut found = false;
+            let mut possible_names = vec![app_name.clone()];
+            if let Some(meta) = &local_meta {
+                if let Some(attrs) = &meta.metadata.custom_attributes {
+                    if let Some(folder) = attrs.get("FolderName") {
+                        possible_names.push(folder.value.clone());
+                    }
+                }
+            }
+
+            'search: for name in possible_names {
+                for ext in &["exe", "sh", ""] {
+                    let filename = if ext.is_empty() { name.clone() } else { format!("{}.{}", name, ext) };
+                    let exe_path = path.join(filename);
+                    if exe_path.exists() {
+                        self.status_message = format!("Launching: {:?}", exe_path);
+                        let mut cmd = if std::env::consts::OS == "linux" {
+                            let game_settings = self.config.games.get(&app_name);
+                            let mut c = match game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
+                                Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) => {
+                                    if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
+                                        let mut p = path.clone();
+                                        p.push("proton"); // Typical proton entry point
+                                        let is_proton = p.exists();
+                                        if !is_proton {
+                                            p.pop();
+                                            p.push("bin/wine");
+                                        }
+                                        let mut command = std::process::Command::new(p);
+                                        if is_proton {
+                                            if let Some(compat_path) = get_default_compat_data_path() {
+                                                command.env("STEAM_COMPAT_DATA_PATH", &compat_path);
+                                            }
+                                            if let Some(home) = home::home_dir() {
+                                                command.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", home.join(".local/share/Steam"));
+                                            }
+                                            command.arg("run");
+                                        }
+                                        command
+                                    } else {
+                                        std::process::Command::new("wine")
+                                    }
+                                }
+                                Some(CompatibilityTool::SystemWine) => {
+                                    std::process::Command::new("wine")
+                                }
+                                None => std::process::Command::new("wine"),
+                            };
+                            c.arg(exe_path);
+
+                            // Epic arguments
+                            c.arg("-AUTH_LOGIN=unused");
+                            c.arg(format!("-AUTH_PASSWORD={}", token));
+                            c.arg("-AUTH_TYPE=exchangecode");
+                            c.arg(format!("-epicapp={}", app_name));
+                            c.arg("-epicenv=Prod");
+
+                            if let Some(settings) = game_settings {
+                                if settings.play_offline {
+                                    c.arg("-offline");
+                                }
+                                for param in settings.start_params.split_whitespace() {
+                                    c.arg(param);
+                                }
+                            }
+                            c
+                        } else {
+                            let mut command = std::process::Command::new(exe_path);
+
+                            // Epic arguments
+                            command.arg("-AUTH_LOGIN=unused");
+                            command.arg(format!("-AUTH_PASSWORD={}", token));
+                            command.arg("-AUTH_TYPE=exchangecode");
+                            command.arg(format!("-epicapp={}", app_name));
+                            command.arg("-epicenv=Prod");
+
+                            if let Some(settings) = self.config.games.get(&app_name) {
+                                if settings.play_offline {
+                                    command.arg("-offline");
+                                }
+                                for param in settings.start_params.split_whitespace() {
+                                    command.arg(param);
+                                }
+                            }
+                            command
+                        };
+
+                        match cmd.spawn() {
+                            Ok(child) => {
+                                self.running_processes.insert(app_name.clone(), child);
+                                found = true;
+                            }
+                            Err(e) => {
+                                self.status_message = format!("Failed to spawn process: {}", e);
+                            }
+                        }
+                        break 'search;
+                    }
+                }
+            }
+            if !found {
+                self.status_message = format!("Could not find executable in {}", installed.install_path);
+            }
+        }
+    }
+
     fn show_game_detail_view(&mut self, ui: &mut egui::Ui) {
-        if let Some(game) = &self.selected_game {
-            let app_name = self.selected_app_name.as_ref().cloned().unwrap_or_else(|| game.id.clone());
+        let selected_game = self.selected_game.clone();
+        let selected_app_name = self.selected_app_name.clone();
+
+        if let Some(game) = selected_game {
+            let app_name = selected_app_name.unwrap_or_else(|| game.id.clone());
             let local_meta = crate::auth::load_local_metadata(&app_name);
 
             if ui.button("Back").clicked() {
@@ -890,97 +1056,21 @@ impl LegendaryApp {
                                 self.status_message = format!("Stopped game: {}", app_name);
                             }
                         } else {
-                            if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == app_name) {
-                                let path = std::path::PathBuf::from(&installed.install_path);
-                                let mut found = false;
-                                let mut possible_names = vec![app_name.clone()];
-                                if let Some(meta) = &local_meta {
-                                    if let Some(attrs) = &meta.metadata.custom_attributes {
-                                        if let Some(folder) = attrs.get("FolderName") {
-                                            possible_names.push(folder.value.clone());
-                                        }
-                                    }
-                                }
+                            let offline = self.config.games.get(&app_name).map(|s| s.play_offline).unwrap_or(false);
+                            if offline {
+                                let can_run_offline = local_meta.as_ref().map(|m| {
+                                    m.metadata.custom_attributes.as_ref().and_then(|attrs| {
+                                        attrs.get("CanRunOffline").map(|a| a.value == "true")
+                                    }).unwrap_or(true)
+                                }).unwrap_or(true);
 
-                                'search: for name in possible_names {
-                                    for ext in &["exe", "sh", ""] {
-                                        let filename = if ext.is_empty() { name.clone() } else { format!("{}.{}", name, ext) };
-                                        let exe_path = path.join(filename);
-                                        if exe_path.exists() {
-                                            self.status_message = format!("Launching: {:?}", exe_path);
-                                            let mut cmd = if std::env::consts::OS == "linux" {
-                                                let game_settings = self.config.games.get(&app_name);
-                                                let mut c = match game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
-                                                    Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) => {
-                                                        if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
-                                                            let mut p = path.clone();
-                                                            p.push("proton"); // Typical proton entry point
-                                                            let is_proton = p.exists();
-                                                            if !is_proton {
-                                                                p.pop();
-                                                                p.push("bin/wine");
-                                                            }
-                                                            let mut command = std::process::Command::new(p);
-                                                            if is_proton {
-                                                                if let Some(compat_path) = get_default_compat_data_path() {
-                                                                    command.env("STEAM_COMPAT_DATA_PATH", &compat_path);
-                                                                }
-                                                                if let Some(home) = home::home_dir() {
-                                                                    command.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", home.join(".local/share/Steam"));
-                                                                }
-                                                                command.arg("run");
-                                                            }
-                                                            command
-                                                        } else {
-                                                            std::process::Command::new("wine")
-                                                        }
-                                                    }
-                                                    Some(CompatibilityTool::SystemWine) => {
-                                                        std::process::Command::new("wine")
-                                                    }
-                                                    None => std::process::Command::new("wine"),
-                                                };
-                                                c.arg(exe_path);
-                                                if let Some(settings) = game_settings {
-                                                if settings.play_offline {
-                                                    c.arg("-offline");
-                                                }
-                                                    for param in settings.start_params.split_whitespace() {
-                                                        c.arg(param);
-                                                    }
-                                                }
-                                                c
-                                            } else {
-                                                let mut command = std::process::Command::new(exe_path);
-                                                if let Some(settings) = self.config.games.get(&app_name) {
-                                                if settings.play_offline {
-                                                    command.arg("-offline");
-                                                }
-                                                    for param in settings.start_params.split_whitespace() {
-                                                        command.arg(param);
-                                                    }
-                                                }
-                                                command
-                                            };
-
-                                            match cmd.spawn() {
-                                                Ok(child) => {
-                                                    self.running_processes.insert(app_name.clone(), child);
-                                                    found = true;
-                                                }
-                                                Err(e) => {
-                                                    self.status_message = format!("Failed to spawn process: {}", e);
-                                                }
-                                            }
-                                            break 'search;
-                                        }
-                                    }
+                                if !can_run_offline {
+                                    self.status_message = "Warning: Game may not support offline mode.".to_string();
                                 }
-                                if !found {
-                                    self.status_message = format!("Could not find executable in {}", installed.install_path);
-                                }
+                                self.launch_game_with_token(app_name.clone(), "".to_string());
                             } else {
-                                self.status_message = format!("Launch failed: {} not found in installed games", app_name);
+                                let _ = self.tx.send(WorkerMsg::FetchGameToken(app_name.clone()));
+                                self.status_message = "Fetching game token...".to_string();
                             }
                         }
                     }
@@ -1010,7 +1100,7 @@ impl LegendaryApp {
                             let _ = self.tx.send(WorkerMsg::RepairGame(app_name.clone(), true));
                         }
                         if ui.button("Uninstall").clicked() {
-                            self.status_message = "Uninstall not implemented yet".to_string();
+                            let _ = self.tx.send(WorkerMsg::UninstallGame(app_name.clone()));
                         }
                     }
                 });

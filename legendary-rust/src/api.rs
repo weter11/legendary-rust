@@ -71,6 +71,23 @@ impl EgsClient {
         Ok(token)
     }
 
+    pub fn get_game_token(&self) -> Result<String> {
+        let url = "https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/exchange";
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+
+        let response = self.client.get(url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to get game token: {}", response.status()));
+        }
+
+        let json: serde_json::Value = response.json()?;
+        let code = json.get("code").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Code not found in response"))?;
+        Ok(code.to_string())
+    }
+
     pub fn set_token(&mut self, token: &str) {
         self.access_token = Some(token.to_string());
     }
