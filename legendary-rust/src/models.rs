@@ -91,10 +91,10 @@ pub struct LocalGameMetadata {
     pub metadata: LocalMetadataDetails,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct LocalMetadataDetails {
     pub developer: Option<String>,
-    #[serde(rename = "keyImages")]
+    #[serde(rename = "keyImages", default)]
     pub key_images: Vec<KeyImage>,
     #[serde(rename = "dlcItemList")]
     pub dlc_item_list: Option<Vec<DlcItem>>,

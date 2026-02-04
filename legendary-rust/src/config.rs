@@ -28,6 +28,8 @@ pub struct GameSettings {
     pub custom_compatibility_path: Option<PathBuf>,
     pub play_time_seconds: u64,
     pub save_path: Option<PathBuf>,
+    #[serde(default)]
+    pub start_params: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -41,8 +43,13 @@ impl AppConfig {
     pub fn load() -> Self {
         if let Some(mut p) = get_config_dir() {
             p.push("config.toml");
-            if let Ok(content) = std::fs::read_to_string(p) {
-                return toml::from_str(&content).unwrap_or_default();
+            if let Ok(content) = std::fs::read_to_string(&p) {
+                match toml::from_str(&content) {
+                    Ok(config) => return config,
+                    Err(e) => log::error!("Failed to parse config.toml at {:?}: {}", p, e),
+                }
+            } else {
+                log::info!("No config.toml found at {:?}, using defaults", p);
             }
         }
         Self::default()

@@ -274,14 +274,19 @@ impl eframe::App for LegendaryApp {
             }
         }
 
-        egui::SidePanel::left("side_panel").show(ctx, |ui| {
+        egui::SidePanel::left("side_panel")
+            .resizable(true)
+            .default_width(150.0)
+            .show(ctx, |ui| {
             ui.heading("Legendary Rust");
-            if ui.button("Library").clicked() {
+            ui.add_space(10.0);
+            if ui.selectable_label(self.current_view == View::Library, "Library").clicked() {
                 self.current_view = View::Library;
             }
-            if ui.button("Settings").clicked() {
+            if ui.selectable_label(self.current_view == View::Settings, "Settings").clicked() {
                 self.current_view = View::Settings;
             }
+            ui.add_space(10.0);
             if self.token.is_none() {
                 if ui.button("Login").clicked() {
                     self.current_view = View::Auth;
@@ -510,7 +515,7 @@ impl LegendaryApp {
                     });
                 });
 
-                if cfg!(target_os = "linux") {
+                if std::env::consts::OS == "linux" {
                     ui.add_space(10.0);
                     ui.group(|ui| {
                         ui.label("Compatibility Tool:");
@@ -577,6 +582,19 @@ impl LegendaryApp {
                     ui.label(desc);
                 }
 
+                ui.add_space(10.0);
+                ui.group(|ui| {
+                    ui.label("Additional Parameters:");
+                    let mut changed = false;
+                    let game_settings = self.config.games.entry(app_name.clone()).or_default();
+                    if ui.text_edit_singleline(&mut game_settings.start_params).changed() {
+                        changed = true;
+                    }
+                    if changed {
+                        let _ = self.config.save();
+                    }
+                });
+
                 ui.add_space(20.0);
                 ui.horizontal(|ui| {
                     if ui.button(egui::RichText::new("Start Game").size(24.0).strong()).clicked() {
@@ -599,7 +617,7 @@ impl LegendaryApp {
                                         let exe_path = path.join(filename);
                                         if exe_path.exists() {
                                             self.status_message = format!("Launching: {:?}", exe_path);
-                                        let mut cmd = if cfg!(target_os = "linux") {
+                                        let mut cmd = if std::env::consts::OS == "linux" {
                                             let game_settings = self.config.games.get(&app_name);
                                             let mut c = match game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
                                                 Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) => {
@@ -623,9 +641,20 @@ impl LegendaryApp {
                                                 None => std::process::Command::new("wine"),
                                             };
                                             c.arg(exe_path);
+                                            if let Some(settings) = game_settings {
+                                                for param in settings.start_params.split_whitespace() {
+                                                    c.arg(param);
+                                                }
+                                            }
                                             c
                                         } else {
-                                            std::process::Command::new(exe_path)
+                                            let mut command = std::process::Command::new(exe_path);
+                                            if let Some(settings) = self.config.games.get(&app_name) {
+                                                for param in settings.start_params.split_whitespace() {
+                                                    command.arg(param);
+                                                }
+                                            }
+                                            command
                                         };
 
                                         let _ = cmd.spawn();

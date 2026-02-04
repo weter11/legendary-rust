@@ -58,10 +58,15 @@ pub fn load_installed_games() -> Vec<crate::models::InstalledGame> {
 pub fn load_local_metadata(app_name: &str) -> Option<crate::models::LocalGameMetadata> {
     let mut path = get_config_dir()?;
     path.push("metadata");
-    path.push(format!("{}.json", app_name));
+    let metadata_file = path.join(format!("{}.json", app_name));
 
-    if let Ok(content) = std::fs::read_to_string(path) {
-        return serde_json::from_str(&content).ok();
+    if let Ok(content) = std::fs::read_to_string(&metadata_file) {
+        match serde_json::from_str(&content) {
+            Ok(meta) => return Some(meta),
+            Err(e) => log::error!("Failed to parse metadata file {:?}: {}", metadata_file, e),
+        }
+    } else {
+        log::debug!("Metadata file not found: {:?}", metadata_file);
     }
     None
 }
