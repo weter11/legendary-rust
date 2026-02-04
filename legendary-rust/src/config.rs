@@ -70,18 +70,23 @@ impl AppConfig {
 pub fn find_steam_protons() -> Vec<PathBuf> {
     let mut protons = Vec::new();
     let home = home::home_dir().unwrap_or_default();
-    let steam_paths = vec![
-        home.join(".local/share/Steam/compatibilitytools.d"),
-        home.join(".steam/root/compatibilitytools.d"),
-        home.join(".steam/steam/compatibilitytools.d"),
-        PathBuf::from("/usr/share/steam/compatibilitytools.d"),
+    let steam_common_paths = vec![
+        home.join(".local/share/Steam/steamapps/common"),
+        home.join(".steam/root/steamapps/common"),
+        home.join(".steam/steam/steamapps/common"),
     ];
 
-    for path in steam_paths {
+    for path in steam_common_paths {
         if let Ok(entries) = std::fs::read_dir(path) {
             for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    protons.push(entry.path());
+                let p = entry.path();
+                if p.is_dir() {
+                    if let Some(name) = p.file_name() {
+                        let name_str = name.to_string_lossy();
+                        if name_str.starts_with("Proton") {
+                            protons.push(p);
+                        }
+                    }
                 }
             }
         }
@@ -95,14 +100,23 @@ pub fn find_steam_protons() -> Vec<PathBuf> { Vec::new() }
 #[cfg(target_os = "linux")]
 pub fn find_custom_wines() -> Vec<PathBuf> {
     let mut wines = Vec::new();
+    let home = home::home_dir().unwrap_or_default();
+
+    let mut search_paths = vec![
+        home.join(".local/share/Steam/compatibilitytools.d"),
+    ];
     if let Some(p) = get_config_dir() {
-        // Look in .config/legendary/ (as requested)
+        search_paths.push(p);
+    }
+
+    for p in search_paths {
         if let Ok(entries) = std::fs::read_dir(&p) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    if name.contains("wine") || name.contains("proton") {
+                    let name_lower = name.to_lowercase();
+                    if name_lower.contains("wine") || name_lower.contains("proton") {
                         wines.push(path);
                     }
                 }

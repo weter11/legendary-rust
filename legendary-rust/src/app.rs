@@ -598,25 +598,24 @@ impl LegendaryApp {
                 ui.add_space(20.0);
                 ui.horizontal(|ui| {
                     if ui.button(egui::RichText::new("Start Game").size(24.0).strong()).clicked() {
-                        if let Some(asset) = self.assets.iter().find(|a| a.catalog_item_id == game.id) {
-                            if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == asset.app_name) {
-                                let path = std::path::PathBuf::from(&installed.install_path);
-                                let mut found = false;
-                                let mut possible_names = vec![asset.app_name.clone()];
-                                if let Some(meta) = &local_meta {
-                                    if let Some(attrs) = &meta.metadata.custom_attributes {
-                                        if let Some(folder) = attrs.get("FolderName") {
-                                            possible_names.push(folder.value.clone());
-                                        }
+                        if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == app_name) {
+                            let path = std::path::PathBuf::from(&installed.install_path);
+                            let mut found = false;
+                            let mut possible_names = vec![app_name.clone()];
+                            if let Some(meta) = &local_meta {
+                                if let Some(attrs) = &meta.metadata.custom_attributes {
+                                    if let Some(folder) = attrs.get("FolderName") {
+                                        possible_names.push(folder.value.clone());
                                     }
                                 }
+                            }
 
-                                'search: for name in possible_names {
-                                    for ext in &["exe", "sh", ""] {
-                                        let filename = if ext.is_empty() { name.clone() } else { format!("{}.{}", name, ext) };
-                                        let exe_path = path.join(filename);
-                                        if exe_path.exists() {
-                                            self.status_message = format!("Launching: {:?}", exe_path);
+                            'search: for name in possible_names {
+                                for ext in &["exe", "sh", ""] {
+                                    let filename = if ext.is_empty() { name.clone() } else { format!("{}.{}", name, ext) };
+                                    let exe_path = path.join(filename);
+                                    if exe_path.exists() {
+                                        self.status_message = format!("Launching: {:?}", exe_path);
                                         let mut cmd = if std::env::consts::OS == "linux" {
                                             let game_settings = self.config.games.get(&app_name);
                                             let mut c = match game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
@@ -658,19 +657,16 @@ impl LegendaryApp {
                                         };
 
                                         let _ = cmd.spawn();
-                                            found = true;
-                                            break 'search;
-                                        }
+                                        found = true;
+                                        break 'search;
                                     }
                                 }
-                                if !found {
-                                    self.status_message = format!("Could not find executable in {}", installed.install_path);
-                                }
-                            } else {
-                                self.status_message = "Game not installed according to Legendary config".to_string();
+                            }
+                            if !found {
+                                self.status_message = format!("Could not find executable in {}", installed.install_path);
                             }
                         } else {
-                            self.status_message = "Launch failed: app name not found".to_string();
+                            self.status_message = format!("Launch failed: {} not found in installed games", app_name);
                         }
                     }
 
