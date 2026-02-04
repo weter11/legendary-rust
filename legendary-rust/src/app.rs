@@ -10,6 +10,7 @@ use crate::models::InstalledGame;
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
+use chrono::{DateTime, Utc};
 
 use crate::config::{AppConfig, CompatibilityTool};
 
@@ -29,8 +30,16 @@ pub struct LegendaryApp {
     tx: Sender<WorkerMsg>,
     rx: Receiver<WorkerResponse>,
     running_processes: HashMap<String, std::process::Child>,
-    conflicts: Option<(String, Vec<crate::models::CloudSaveFile>)>, // app_name, files
+    conflicts: Option<SaveSyncConflict>,
     install_info: Option<crate::models::InstallInfo>,
+}
+
+#[derive(Clone)]
+pub struct SaveSyncConflict {
+    pub app_name: String,
+    pub files: Vec<crate::models::CloudSaveFile>,
+    pub local_time: Option<DateTime<Utc>>,
+    pub remote_time: Option<DateTime<Utc>>,
 }
 
 enum WorkerMsg {
@@ -53,6 +62,7 @@ enum WorkerMsg {
     SyncCloudSaves {
         app_name: String,
         namespace: String,
+        save_path: Option<std::path::PathBuf>,
     },
     UploadCloudSave {
         app_name: String,
@@ -91,7 +101,12 @@ enum WorkerResponse {
     Error(String),
     TaskProgress(String, f32), // task_name, progress
     TaskFinished(String),
-    CloudSyncConflict(String, Vec<crate::models::CloudSaveFile>),
+    CloudSyncConflict {
+        app_name: String,
+        files: Vec<crate::models::CloudSaveFile>,
+        local_time: Option<DateTime<Utc>>,
+        remote_time: Option<DateTime<Utc>>,
+    },
     InstallInfoFetched(crate::models::InstallInfo),
     GamesScanned(Vec<InstalledGame>),
     GameTokenFetched {
@@ -120,6 +135,30 @@ fn color_to_grayscale(pixels: &mut [egui::Color32]) {
 
 use sha2::{Sha256, Digest};
 use sha1::{Sha1, Digest as _};
+
+fn get_latest_local_save_time(path: &std::path::Path) -> Option<DateTime<Utc>> {
+    let mut latest: Option<DateTime<Utc>> = None;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if let Some(t) = get_latest_local_save_time(&p) {
+                    if latest.is_none() || t > latest.unwrap() {
+                        latest = Some(t);
+                    }
+                }
+            } else if let Ok(meta) = std::fs::metadata(p) {
+                if let Ok(modified) = meta.modified() {
+                    let dt: DateTime<Utc> = modified.into();
+                    if latest.is_none() || dt > latest.unwrap() {
+                        latest = Some(dt);
+                    }
+                }
+            }
+        }
+    }
+    latest
+}
 
 fn hash_file(path: &std::path::Path) -> Result<String, std::io::Error> {
     let mut file = std::fs::File::open(path)?;
@@ -344,15 +383,32 @@ impl LegendaryApp {
                         let _ = tx.send(WorkerResponse::TaskFinished(format!("Task '{}' complete", task_name)));
                         ctx_clone.request_repaint();
                     }
-                    WorkerMsg::SyncCloudSaves { app_name, namespace } => {
+                    WorkerMsg::SyncCloudSaves { app_name, namespace, save_path } => {
                         let _ = tx.send(WorkerResponse::TaskProgress(format!("Checking cloud saves for {}", app_name), 0.0));
+                        let local_time = save_path.as_ref().and_then(|p| get_latest_local_save_time(p));
+
                         if let Some(token) = crate::auth::load_token().ok() {
                             match client.get_cloud_save_metadata(&namespace, &token.account_id, &app_name) {
                                 Ok(files) => {
+                                    let mut remote_time = None;
+                                    for file in &files {
+                                        if let Ok(dt) = DateTime::parse_from_rfc3339(&file.last_modified) {
+                                            let dt_utc = dt.with_timezone(&Utc);
+                                            if remote_time.is_none() || dt_utc > remote_time.unwrap() {
+                                                remote_time = Some(dt_utc);
+                                            }
+                                        }
+                                    }
+
                                     if files.is_empty() {
                                         let _ = tx.send(WorkerResponse::TaskFinished("No cloud saves found".to_string()));
                                     } else {
-                                        let _ = tx.send(WorkerResponse::CloudSyncConflict(app_name, files));
+                                        let _ = tx.send(WorkerResponse::CloudSyncConflict {
+                                            app_name,
+                                            files,
+                                            local_time,
+                                            remote_time,
+                                        });
                                     }
                                 }
                                 Err(e) => {
@@ -534,8 +590,13 @@ impl eframe::App for LegendaryApp {
                 WorkerResponse::TaskFinished(msg) => {
                     self.status_message = msg;
                 }
-                WorkerResponse::CloudSyncConflict(app_name, files) => {
-                    self.conflicts = Some((app_name, files));
+                WorkerResponse::CloudSyncConflict { app_name, files, local_time, remote_time } => {
+                    self.conflicts = Some(SaveSyncConflict {
+                        app_name,
+                        files,
+                        local_time,
+                        remote_time,
+                    });
                     self.current_view = View::CloudConflict;
                 }
                 WorkerResponse::InstallInfoFetched(info) => {
@@ -918,9 +979,11 @@ impl LegendaryApp {
                             ui.label(format!("Installed at: {}", installed.install_path));
                             if ui.button("☁ Sync Cloud Saves").clicked() {
                                 if let Some(item) = self.library.iter().find(|i| i.app_name == app_name) {
+                                    let save_path = self.config.games.get(&app_name).and_then(|s| s.save_path.clone());
                                     let _ = self.tx.send(WorkerMsg::SyncCloudSaves {
                                         app_name: app_name.clone(),
                                         namespace: item.namespace.clone(),
+                                        save_path,
                                     });
                                 }
                             }
@@ -1155,16 +1218,52 @@ impl LegendaryApp {
 
     fn show_cloud_conflict_view(&mut self, ui: &mut egui::Ui) {
         let conflict_data = self.conflicts.clone();
-        if let Some((app_name, files)) = conflict_data {
-            ui.heading(format!("Cloud Save Conflict: {}", app_name));
-            ui.label("The following files have different versions between local and cloud:");
+        if let Some(conflict) = conflict_data {
+            ui.heading(format!("Cloud Save Sync: {}", conflict.app_name));
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for file in files {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Local Save:").strong());
+                        if let Some(t) = conflict.local_time {
+                            ui.label(format!("{}", t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S")));
+                        } else {
+                            ui.label("None");
+                        }
+                    });
+
+                    ui.add_space(50.0);
+
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Cloud Save:").strong());
+                        if let Some(t) = conflict.remote_time {
+                            ui.label(format!("{}", t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S")));
+                        } else {
+                            ui.label("None");
+                        }
+                    });
+                });
+            });
+
+            ui.add_space(10.0);
+            if let (Some(l), Some(r)) = (conflict.local_time, conflict.remote_time) {
+                if l > r {
+                    ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "Local save is newer.");
+                } else if r > l {
+                    ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "Cloud save is newer.");
+                } else {
+                    ui.label("Both saves appear to be synchronized.");
+                }
+            }
+
+            ui.add_space(10.0);
+            ui.label("Cloud files:");
+            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                for file in &conflict.files {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(&file.file_name);
-                            ui.label(format!("(Cloud Size: {} bytes)", file.length));
+                            ui.label(format!("({} bytes)", file.length));
                         });
                     });
                 }
@@ -1172,20 +1271,20 @@ impl LegendaryApp {
 
             ui.add_space(20.0);
             ui.horizontal(|ui| {
-                if ui.button("Upload local files to Cloud").clicked() {
-                    if let Some(item) = self.library.iter().find(|i| i.app_name == app_name) {
+                if ui.button(egui::RichText::new("Upload local to Cloud").strong()).clicked() {
+                    if let Some(item) = self.library.iter().find(|i| i.app_name == conflict.app_name) {
                         let _ = self.tx.send(WorkerMsg::UploadCloudSave {
-                            app_name: app_name.clone(),
+                            app_name: conflict.app_name.clone(),
                             namespace: item.namespace.clone(),
                         });
                     }
                     self.conflicts = None;
                     self.current_view = View::GameDetail;
                 }
-                if ui.button("Download Cloud files to PC").clicked() {
-                    if let Some(item) = self.library.iter().find(|i| i.app_name == app_name) {
+                if ui.button(egui::RichText::new("Download Cloud to PC").strong()).clicked() {
+                    if let Some(item) = self.library.iter().find(|i| i.app_name == conflict.app_name) {
                         let _ = self.tx.send(WorkerMsg::DownloadCloudSave {
-                            app_name: app_name.clone(),
+                            app_name: conflict.app_name.clone(),
                             namespace: item.namespace.clone(),
                         });
                     }
