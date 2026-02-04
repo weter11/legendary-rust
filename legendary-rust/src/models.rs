@@ -82,6 +82,20 @@ pub struct InstalledGame {
     pub install_path: String,
     pub title: String,
     pub version: String,
+    #[serde(default)]
+    pub install_size: u64,
+    #[serde(default)]
+    pub download_size: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallInfo {
+    pub app_name: String,
+    pub title: String,
+    pub install_path: std::path::PathBuf,
+    pub download_size: u64,
+    pub install_size: u64,
+    pub free_space: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

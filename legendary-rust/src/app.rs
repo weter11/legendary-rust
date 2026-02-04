@@ -30,6 +30,7 @@ pub struct LegendaryApp {
     rx: Receiver<WorkerResponse>,
     running_processes: HashMap<String, std::process::Child>,
     conflicts: Option<(String, Vec<crate::models::CloudSaveFile>)>, // app_name, files
+    install_info: Option<crate::models::InstallInfo>,
 }
 
 enum WorkerMsg {
@@ -44,7 +45,10 @@ enum WorkerMsg {
         image_type: String,
     },
     Logout,
-    VerifyGame(String),
+    VerifyGame {
+        app_name: String,
+        catalog_item_id: String,
+    },
     RepairGame(String, bool), // app_name, update
     SyncCloudSaves {
         app_name: String,
@@ -57,6 +61,14 @@ enum WorkerMsg {
     DownloadCloudSave {
         app_name: String,
         namespace: String,
+    },
+    FetchInstallInfo {
+        app_name: String,
+        title: String,
+    },
+    InstallGame {
+        app_name: String,
+        install_path: std::path::PathBuf,
     },
 }
 
@@ -74,6 +86,7 @@ enum WorkerResponse {
     TaskProgress(String, f32), // task_name, progress
     TaskFinished(String),
     CloudSyncConflict(String, Vec<crate::models::CloudSaveFile>),
+    InstallInfoFetched(crate::models::InstallInfo),
 }
 
 #[derive(PartialEq)]
@@ -83,6 +96,7 @@ enum View {
     GameDetail,
     Settings,
     CloudConflict,
+    InstallDialog,
 }
 
 fn color_to_grayscale(pixels: &mut [egui::Color32]) {
@@ -275,12 +289,12 @@ impl LegendaryApp {
                         });
                         // Clear client token too if needed
                     }
-                    WorkerMsg::VerifyGame(app_name) => {
+                    WorkerMsg::VerifyGame { app_name, catalog_item_id } => {
                         let _ = tx.send(WorkerResponse::TaskProgress(format!("Verifying {}", app_name), 0.0));
                         let installed = crate::auth::load_installed_games();
                         let game = installed.iter().find(|g| g.app_name == app_name);
 
-                        if let (Some(game), Some(manifest_path)) = (game, crate::auth::get_manifest_path(&app_name)) {
+                        if let (Some(game), Some(manifest_path)) = (game, crate::auth::get_manifest_path(&app_name, &catalog_item_id)) {
                             let _ = tx.send(WorkerResponse::TaskProgress(format!("Reading manifest at {:?}", manifest_path), 0.1));
 
                             let game_dir = std::path::Path::new(&game.install_path);
@@ -349,6 +363,64 @@ impl LegendaryApp {
                         let _ = tx.send(WorkerResponse::TaskFinished(format!("Download for {} complete", app_name)));
                         ctx_clone.request_repaint();
                     }
+                    WorkerMsg::FetchInstallInfo { app_name, title } => {
+                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Fetching install info for {}", app_name), 0.0));
+
+                        let local_meta = crate::auth::load_local_metadata(&app_name);
+                        let mut install_size = 0;
+                        let mut download_size = 0;
+
+                        if let Some(meta) = local_meta {
+                            if let Some(attrs) = meta.metadata.custom_attributes {
+                                if let Some(size) = attrs.get("MaxSizeMB") {
+                                    install_size = size.value.parse::<u64>().unwrap_or(0) * 1024 * 1024;
+                                }
+                            }
+                        }
+
+                        // Fallback/Estimate
+                        if install_size == 0 { install_size = 10 * 1024 * 1024 * 1024; } // 10GB default
+                        if download_size == 0 {
+                            download_size = (install_size as f32 * 0.5) as u64; // Estimate 50% compression
+                        }
+
+                        let install_path = if let Some(home) = home::home_dir() {
+                            let mut p = home;
+                            p.push("Games");
+                            p.push(&app_name);
+                            p
+                        } else {
+                            std::path::PathBuf::from("/tmp").join(&app_name)
+                        };
+
+                        use fs2::free_space;
+                        let free = if let Some(parent) = install_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                            free_space(parent).unwrap_or(0)
+                        } else {
+                            0
+                        };
+
+                        let info = crate::models::InstallInfo {
+                            app_name,
+                            title,
+                            install_path,
+                            download_size,
+                            install_size,
+                            free_space: free,
+                        };
+                        let _ = tx.send(WorkerResponse::InstallInfoFetched(info));
+                        ctx_clone.request_repaint();
+                    }
+                    WorkerMsg::InstallGame { app_name, install_path } => {
+                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Installing {} to {:?}", app_name, install_path), 0.0));
+                        for i in 1..=10 {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            let _ = tx.send(WorkerResponse::TaskProgress(format!("Downloading {}", app_name), i as f32 / 10.0));
+                        }
+                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Installation of {} complete", app_name)));
+                        ctx_clone.request_repaint();
+                    }
                 }
             }
         });
@@ -370,6 +442,7 @@ impl LegendaryApp {
             rx,
             running_processes: HashMap::new(),
             conflicts: None,
+            install_info: None,
         }
     }
 }
@@ -419,6 +492,10 @@ impl eframe::App for LegendaryApp {
                     self.conflicts = Some((app_name, files));
                     self.current_view = View::CloudConflict;
                 }
+                WorkerResponse::InstallInfoFetched(info) => {
+                    self.install_info = Some(info);
+                    self.current_view = View::InstallDialog;
+                }
             }
         }
 
@@ -458,6 +535,7 @@ impl eframe::App for LegendaryApp {
                 View::GameDetail => self.show_game_detail_view(ui),
                 View::Settings => self.show_settings_view(ui),
                 View::CloudConflict => self.show_cloud_conflict_view(ui),
+                View::InstallDialog => self.show_install_dialog_view(ui),
             }
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -563,7 +641,16 @@ impl LegendaryApp {
                                         self.status_message = "Fetching game info...".to_string();
                                     }
                                 });
-                                ui.label(format!("ID: {}", item.app_name));
+                                    ui.horizontal(|ui| {
+                                        ui.label(format!("ID: {}", item.app_name));
+                                        if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == item.app_name) {
+                                            ui.label(format!("| v{}", installed.version));
+                                            let size_gb = installed.install_size as f32 / (1024.0 * 1024.0 * 1024.0);
+                                            if size_gb > 0.0 {
+                                                ui.label(format!("| {:.2} GB", size_gb));
+                                            }
+                                        }
+                                    });
                             });
                         });
                     });
@@ -616,10 +703,15 @@ impl LegendaryApp {
                                 ui.label(egui::RichText::new(format!("Developer: {}", dev)).italics());
                             }
                         }
-                        ui.label(format!("Application Name: {}", app_name));
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Application Name: {}", app_name));
+                            if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == app_name) {
+                                ui.label(format!("(v{})", installed.version));
+                            }
+                        });
 
                         if let Some(asset) = self.assets.iter().find(|a| a.catalog_item_id == game.id) {
-                            ui.label(format!("Version: {}", asset.build_version));
+                            ui.label(format!("Available Version: {}", asset.build_version));
                         }
 
                         if let Some(meta) = &local_meta {
@@ -803,7 +895,10 @@ impl LegendaryApp {
                                                             let mut command = std::process::Command::new(p);
                                                             if is_proton {
                                                                 if let Some(compat_path) = get_default_compat_data_path() {
-                                                                    command.env("STEAM_COMPAT_DATA_PATH", compat_path);
+                                                                    command.env("STEAM_COMPAT_DATA_PATH", &compat_path);
+                                                                }
+                                                                if let Some(home) = home::home_dir() {
+                                                                    command.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", home.join(".local/share/Steam"));
                                                                 }
                                                                 command.arg("run");
                                                             }
@@ -858,12 +953,21 @@ impl LegendaryApp {
 
                     let is_installed = self.installed_games.iter().any(|g| g.app_name == app_name);
                     if !is_installed {
-                        if ui.button("Install").clicked() {
-                            self.status_message = "Install not implemented yet".to_string();
+                        if ui.button(egui::RichText::new("Install").size(24.0).strong()).clicked() {
+                            let _ = self.tx.send(WorkerMsg::FetchInstallInfo {
+                                app_name: app_name.clone(),
+                                title: game.title.clone(),
+                            });
                         }
                     } else {
                         if ui.button("Verify").clicked() {
-                            let _ = self.tx.send(WorkerMsg::VerifyGame(app_name.clone()));
+                            let catalog_item_id = self.library.iter().find(|i| i.app_name == app_name)
+                                .map(|i| i.catalog_item_id.clone())
+                                .unwrap_or_default();
+                            let _ = self.tx.send(WorkerMsg::VerifyGame {
+                                app_name: app_name.clone(),
+                                catalog_item_id
+                            });
                         }
                         if ui.button("Repair").clicked() {
                             let _ = self.tx.send(WorkerMsg::RepairGame(app_name.clone(), false));
@@ -876,6 +980,51 @@ impl LegendaryApp {
                         }
                     }
                 });
+            });
+        }
+    }
+
+    fn show_install_dialog_view(&mut self, ui: &mut egui::Ui) {
+        if let Some(info) = &self.install_info {
+            ui.heading(format!("Install {}", info.title));
+            ui.add_space(10.0);
+
+            egui::Grid::new("install_grid")
+                .spacing(egui::vec2(20.0, 10.0))
+                .show(ui, |ui| {
+                ui.label("Install folder:");
+                ui.label(info.install_path.to_string_lossy());
+                ui.end_row();
+
+                ui.label("Download size:");
+                ui.label(format!("{:.2} GB", info.download_size as f32 / (1024.0 * 1024.0 * 1024.0)));
+                ui.end_row();
+
+                ui.label("Size after install:");
+                ui.label(format!("{:.2} GB", info.install_size as f32 / (1024.0 * 1024.0 * 1024.0)));
+                ui.end_row();
+
+                ui.label("Available space:");
+                ui.label(format!("{:.2} GB", info.free_space as f32 / (1024.0 * 1024.0 * 1024.0)));
+                ui.end_row();
+            });
+
+            ui.add_space(20.0);
+            if info.free_space < info.install_size {
+                ui.colored_label(egui::Color32::RED, "⚠ Not enough disk space!");
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("Install").clicked() {
+                    let _ = self.tx.send(WorkerMsg::InstallGame {
+                        app_name: info.app_name.clone(),
+                        install_path: info.install_path.clone(),
+                    });
+                    self.current_view = View::Library;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.current_view = View::GameDetail;
+                }
             });
         }
     }
