@@ -150,7 +150,7 @@ impl EgsClient {
 
     pub fn get_cloud_save_metadata(&self, namespace: &str, account_id: &str, app_id: &str) -> Result<Vec<CloudSaveFile>> {
         let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://cloudstorage-public-service-ecom.live.epicgames.com/cloudstorage/api/storage/{}/{}/{}", namespace, account_id, app_id);
+        let url = format!("https://cloudstorage-public-service-prod.ol.epicgames.com/cloudstorage/api/storage/{}/{}/{}", namespace, account_id, app_id);
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
@@ -170,7 +170,7 @@ impl EgsClient {
 
     pub fn download_cloud_file(&self, namespace: &str, account_id: &str, app_id: &str, filename: &str) -> Result<Vec<u8>> {
         let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://cloudstorage-public-service-ecom.live.epicgames.com/cloudstorage/api/storage/{}/{}/{}/{}", namespace, account_id, app_id, filename);
+        let url = format!("https://cloudstorage-public-service-prod.ol.epicgames.com/cloudstorage/api/storage/{}/{}/{}/{}", namespace, account_id, app_id, filename);
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
@@ -184,7 +184,7 @@ impl EgsClient {
 
     pub fn upload_cloud_file(&self, namespace: &str, account_id: &str, app_id: &str, filename: &str, data: Vec<u8>) -> Result<()> {
         let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://cloudstorage-public-service-ecom.live.epicgames.com/cloudstorage/api/storage/{}/{}/{}/{}", namespace, account_id, app_id, filename);
+        let url = format!("https://cloudstorage-public-service-prod.ol.epicgames.com/cloudstorage/api/storage/{}/{}/{}/{}", namespace, account_id, app_id, filename);
         let response = self.client.put(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .body(data)

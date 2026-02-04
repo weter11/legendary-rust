@@ -41,6 +41,7 @@ pub struct SaveSyncStatus {
     pub local_time: Option<DateTime<Utc>>,
     pub remote_time: Option<DateTime<Utc>>,
     pub loading: bool,
+    pub error: Option<String>,
 }
 
 enum WorkerMsg {
@@ -68,10 +69,12 @@ enum WorkerMsg {
     UploadCloudSave {
         app_name: String,
         namespace: String,
+        save_path: std::path::PathBuf,
     },
     DownloadCloudSave {
         app_name: String,
         namespace: String,
+        save_path: std::path::PathBuf,
     },
     FetchInstallInfo {
         app_name: String,
@@ -107,6 +110,7 @@ enum WorkerResponse {
         files: Vec<crate::models::CloudSaveFile>,
         local_time: Option<DateTime<Utc>>,
         remote_time: Option<DateTime<Utc>>,
+        error: Option<String>,
     },
     InstallInfoFetched(crate::models::InstallInfo),
     GamesScanned(Vec<InstalledGame>),
@@ -135,7 +139,7 @@ fn color_to_grayscale(pixels: &mut [egui::Color32]) {
 
 
 use sha2::{Sha256, Digest};
-use sha1::{Sha1, Digest as _};
+use sha1::Sha1;
 
 fn get_latest_local_save_time(path: &std::path::Path) -> Option<DateTime<Utc>> {
     let mut latest: Option<DateTime<Utc>> = None;
@@ -181,6 +185,19 @@ fn get_all_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     files
+}
+
+fn format_duration(dur: chrono::Duration) -> String {
+    let secs = dur.num_seconds().abs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
+    }
 }
 
 fn get_cache_path(url: &str) -> Option<std::path::PathBuf> {
@@ -406,25 +423,98 @@ impl LegendaryApp {
                                         files,
                                         local_time,
                                         remote_time,
+                                        error: None,
                                     });
                                 }
                                 Err(e) => {
-                                    let _ = tx.send(WorkerResponse::Error(format!("Cloud sync failed: {}", e)));
+                                    let _ = tx.send(WorkerResponse::SaveSyncStatusFetched {
+                                        app_name,
+                                        files: Vec::new(),
+                                        local_time,
+                                        remote_time: None,
+                                        error: Some(e.to_string()),
+                                    });
                                 }
                             }
+                        } else {
+                            let _ = tx.send(WorkerResponse::SaveSyncStatusFetched {
+                                app_name,
+                                files: Vec::new(),
+                                local_time,
+                                remote_time: None,
+                                error: Some("No authentication token found".to_string()),
+                            });
                         }
                         ctx_clone.request_repaint();
                     }
-                    WorkerMsg::UploadCloudSave { app_name, namespace: _ } => {
+                    WorkerMsg::UploadCloudSave { app_name, namespace, save_path } => {
                         let _ = tx.send(WorkerResponse::TaskProgress(format!("Uploading saves for {}", app_name), 0.0));
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Upload for {} complete", app_name)));
+                        if let Ok(token) = crate::auth::load_token() {
+                            let files = get_all_files(&save_path);
+                            let total = files.len();
+                            let mut success = true;
+                            for (i, file_path) in files.iter().enumerate() {
+                                if let Ok(data) = std::fs::read(file_path) {
+                                    let rel_path = file_path.strip_prefix(&save_path).unwrap_or(file_path);
+                                    let filename = rel_path.to_string_lossy().to_string();
+                                    match client.upload_cloud_file(&namespace, &token.account_id, &app_name, &filename, data) {
+                                        Ok(_) => {},
+                                        Err(e) => {
+                                            let _ = tx.send(WorkerResponse::Error(format!("Failed to upload {}: {}", filename, e)));
+                                            success = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                let _ = tx.send(WorkerResponse::TaskProgress(format!("Uploading saves for {}", app_name), (i + 1) as f32 / total as f32));
+                            }
+                            if success {
+                                let _ = tx.send(WorkerResponse::TaskFinished(format!("Upload for {} complete. {} files uploaded.", app_name, total)));
+                            }
+                        } else {
+                            let _ = tx.send(WorkerResponse::Error("Not logged in".to_string()));
+                        }
                         ctx_clone.request_repaint();
                     }
-                    WorkerMsg::DownloadCloudSave { app_name, namespace: _ } => {
+                    WorkerMsg::DownloadCloudSave { app_name, namespace, save_path } => {
                         let _ = tx.send(WorkerResponse::TaskProgress(format!("Downloading saves for {}", app_name), 0.0));
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Download for {} complete", app_name)));
+                        if let Ok(token) = crate::auth::load_token() {
+                            match client.get_cloud_save_metadata(&namespace, &token.account_id, &app_name) {
+                                Ok(files) => {
+                                    let total = files.len();
+                                    let mut success = true;
+                                    for (i, file) in files.iter().enumerate() {
+                                        match client.download_cloud_file(&namespace, &token.account_id, &app_name, &file.file_name) {
+                                            Ok(data) => {
+                                                let target_path = save_path.join(&file.file_name);
+                                                if let Some(parent) = target_path.parent() {
+                                                    let _ = std::fs::create_dir_all(parent);
+                                                }
+                                                if let Err(e) = std::fs::write(&target_path, data) {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to write {}: {}", file.file_name, e)));
+                                                    success = false;
+                                                    break;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                let _ = tx.send(WorkerResponse::Error(format!("Failed to download {}: {}", file.file_name, e)));
+                                                success = false;
+                                                break;
+                                            }
+                                        }
+                                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Downloading saves for {}", app_name), (i + 1) as f32 / total as f32));
+                                    }
+                                    if success {
+                                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Download for {} complete. {} files downloaded.", app_name, total)));
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to get cloud metadata: {}", e)));
+                                }
+                            }
+                        } else {
+                            let _ = tx.send(WorkerResponse::Error("Not logged in".to_string()));
+                        }
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::FetchInstallInfo { app_name, title } => {
@@ -587,13 +677,14 @@ impl eframe::App for LegendaryApp {
                 WorkerResponse::TaskFinished(msg) => {
                     self.status_message = msg;
                 }
-                WorkerResponse::SaveSyncStatusFetched { app_name, files, local_time, remote_time } => {
+                WorkerResponse::SaveSyncStatusFetched { app_name, files, local_time, remote_time, error } => {
                     self.save_sync_status = Some(SaveSyncStatus {
                         app_name,
                         files,
                         local_time,
                         remote_time,
                         loading: false,
+                        error,
                     });
                 }
                 WorkerResponse::InstallInfoFetched(info) => {
@@ -984,6 +1075,7 @@ impl LegendaryApp {
                                         local_time: None,
                                         remote_time: None,
                                         loading: true,
+                                        error: None,
                                     });
                                     self.current_view = View::SaveSync;
 
@@ -1229,11 +1321,47 @@ impl LegendaryApp {
             ui.heading(format!("Cloud Save Sync: {}", status.app_name));
 
             if status.loading {
-                ui.add(egui::Spinner::new());
-                ui.label("Fetching save metadata...");
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new());
+                    ui.label("Fetching save metadata...");
+                });
                 if ui.button("Cancel").clicked() {
+                    self.save_sync_status = None;
                     self.current_view = View::GameDetail;
                 }
+                return;
+            }
+
+            if let Some(err) = &status.error {
+                ui.group(|ui| {
+                    ui.colored_label(egui::Color32::LIGHT_RED, egui::RichText::new("Failed to fetch cloud save metadata").strong());
+                    ui.label(err);
+                });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Retry").clicked() {
+                        if let Some(item) = self.library.iter().find(|i| i.app_name == status.app_name) {
+                            let save_path = self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone());
+                            self.save_sync_status = Some(SaveSyncStatus {
+                                app_name: status.app_name.clone(),
+                                files: Vec::new(),
+                                local_time: None,
+                                remote_time: None,
+                                loading: true,
+                                error: None,
+                            });
+                            let _ = self.tx.send(WorkerMsg::SyncCloudSaves {
+                                app_name: status.app_name.clone(),
+                                namespace: item.namespace.clone(),
+                                save_path,
+                            });
+                        }
+                    }
+                    if ui.button("Back").clicked() {
+                        self.save_sync_status = None;
+                        self.current_view = View::GameDetail;
+                    }
+                });
                 return;
             }
 
@@ -1263,17 +1391,20 @@ impl LegendaryApp {
 
             ui.add_space(10.0);
             if let (Some(l), Some(r)) = (status.local_time, status.remote_time) {
-                if l > r {
-                    ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "Local save is newer.");
-                } else if r > l {
-                    ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "Cloud save is newer.");
+                let diff = (l - r).num_seconds().abs();
+                if diff < 2 {
+                    ui.colored_label(egui::Color32::GREEN, "✔ Both saves are synchronized.");
+                } else if l > r {
+                    ui.colored_label(egui::Color32::YELLOW, format!("⚠ Local save is newer (by {}).", format_duration(l - r)));
                 } else {
-                    ui.label("Both saves appear to be synchronized.");
+                    ui.colored_label(egui::Color32::YELLOW, format!("⚠ Cloud save is newer (by {}).", format_duration(r - l)));
                 }
             } else if status.local_time.is_some() {
-                ui.label("No cloud save found.");
+                ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ No cloud save found. You can upload your local save.");
             } else if status.remote_time.is_some() {
-                ui.label("No local save found.");
+                ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ No local save found. You can download the cloud save.");
+            } else {
+                ui.label("No saves found on either side.");
             }
 
             ui.add_space(10.0);
@@ -1295,20 +1426,22 @@ impl LegendaryApp {
 
             ui.horizontal(|ui| {
                 if ui.add_enabled(can_upload, egui::Button::new(egui::RichText::new("Upload local to Cloud").strong())).clicked() {
-                    if let Some(item) = self.library.iter().find(|i| i.app_name == status.app_name) {
+                    if let (Some(item), Some(save_path)) = (self.library.iter().find(|i| i.app_name == status.app_name), self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone())) {
                         let _ = self.tx.send(WorkerMsg::UploadCloudSave {
                             app_name: status.app_name.clone(),
                             namespace: item.namespace.clone(),
+                            save_path,
                         });
                     }
                     self.save_sync_status = None;
                     self.current_view = View::GameDetail;
                 }
                 if ui.add_enabled(can_download, egui::Button::new(egui::RichText::new("Download Cloud to PC").strong())).clicked() {
-                    if let Some(item) = self.library.iter().find(|i| i.app_name == status.app_name) {
+                    if let (Some(item), Some(save_path)) = (self.library.iter().find(|i| i.app_name == status.app_name), self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone())) {
                         let _ = self.tx.send(WorkerMsg::DownloadCloudSave {
                             app_name: status.app_name.clone(),
                             namespace: item.namespace.clone(),
+                            save_path,
                         });
                     }
                     self.save_sync_status = None;
