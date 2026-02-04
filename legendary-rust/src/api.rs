@@ -130,4 +130,53 @@ impl EgsClient {
         let info: GameInfo = serde_json::from_value(info_val.clone())?;
         Ok(info)
     }
+
+    pub fn get_cloud_save_metadata(&self, namespace: &str, account_id: &str, app_id: &str) -> Result<Vec<CloudSaveFile>> {
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let url = format!("https://cloudstorage-public-service-ecom.live.epicgames.com/cloudstorage/api/storage/{}/{}/{}", namespace, account_id, app_id);
+        let response = self.client.get(&url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if response.status() == 404 {
+            return Ok(Vec::new());
+        }
+
+        if !response.status().is_success() {
+            let err_text = response.text()?;
+            return Err(anyhow::anyhow!("Failed to fetch cloud saves: {}", err_text));
+        }
+
+        let files: Vec<CloudSaveFile> = response.json()?;
+        Ok(files)
+    }
+
+    pub fn download_cloud_file(&self, namespace: &str, account_id: &str, app_id: &str, filename: &str) -> Result<Vec<u8>> {
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let url = format!("https://cloudstorage-public-service-ecom.live.epicgames.com/cloudstorage/api/storage/{}/{}/{}/{}", namespace, account_id, app_id, filename);
+        let response = self.client.get(&url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to download cloud file: {}", response.status()));
+        }
+
+        Ok(response.bytes()?.to_vec())
+    }
+
+    pub fn upload_cloud_file(&self, namespace: &str, account_id: &str, app_id: &str, filename: &str, data: Vec<u8>) -> Result<()> {
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let url = format!("https://cloudstorage-public-service-ecom.live.epicgames.com/cloudstorage/api/storage/{}/{}/{}/{}", namespace, account_id, app_id, filename);
+        let response = self.client.put(&url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .body(data)
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to upload cloud file: {}", response.status()));
+        }
+
+        Ok(())
+    }
 }

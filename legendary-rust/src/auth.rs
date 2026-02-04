@@ -70,3 +70,14 @@ pub fn load_local_metadata(app_name: &str) -> Option<crate::models::LocalGameMet
     }
     None
 }
+
+pub fn get_manifest_path(app_name: &str) -> Option<PathBuf> {
+    let mut p = get_config_dir()?;
+    p.push("manifests");
+    p.push(format!("{}.manifest", app_name));
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
+}

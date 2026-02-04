@@ -121,3 +121,13 @@ pub struct ReleaseInfo {
     pub app_id: String,
     pub platform: Vec<String>,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CloudSaveFile {
+    #[serde(rename = "fileName")]
+    pub file_name: String,
+    pub hash: String,
+    pub length: u64,
+    #[serde(rename = "lastModified")]
+    pub last_modified: String,
+}
