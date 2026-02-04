@@ -82,3 +82,16 @@ pub struct InstalledGame {
     pub title: String,
     pub version: String,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalGameMetadata {
+    pub app_name: String,
+    pub app_title: String,
+    pub metadata: LocalMetadataDetails,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalMetadataDetails {
+    #[serde(rename = "keyImages")]
+    pub key_images: Vec<KeyImage>,
+}

@@ -10,12 +10,15 @@ use crate::models::InstalledGame;
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 
+use std::collections::HashMap;
+
 pub struct LegendaryApp {
     token: Option<OAuthToken>,
     library: Vec<LibraryItem>,
     installed_games: Vec<InstalledGame>,
     assets: Vec<Asset>,
     selected_game: Option<GameInfo>,
+    images: HashMap<String, egui_extras::RetainedImage>,
     auth_code: String,
     status_message: String,
     current_view: View,
@@ -28,6 +31,7 @@ enum WorkerMsg {
     RefreshLibrary,
     FetchGameInfo(String, String), // namespace, catalog_item_id
     FetchAssets,
+    FetchImage(String, String, bool), // app_name, url, is_installed
     Logout,
 }
 
@@ -36,6 +40,7 @@ enum WorkerResponse {
     LibraryFetched(Vec<LibraryItem>),
     GameInfoFetched(GameInfo),
     AssetsFetched(Vec<Asset>),
+    ImageFetched(String, egui::ColorImage),
     Error(String),
 }
 
@@ -44,6 +49,13 @@ enum View {
     Auth,
     Library,
     GameDetail,
+}
+
+fn color_to_grayscale(pixels: &mut [egui::Color32]) {
+    for pixel in pixels {
+        let gray = (pixel.r() as f32 * 0.299 + pixel.g() as f32 * 0.587 + pixel.b() as f32 * 0.114) as u8;
+        *pixel = egui::Color32::from_rgba_unmultiplied(gray, gray, gray, pixel.a());
+    }
 }
 
 impl LegendaryApp {
@@ -103,6 +115,35 @@ impl LegendaryApp {
                             Err(e) => { let _ = tx.send(WorkerResponse::Error(e.to_string())); }
                         }
                     }
+                    WorkerMsg::FetchImage(app_name, url, is_installed) => {
+                        match reqwest::blocking::get(url) {
+                            Ok(res) => {
+                                if let Ok(bytes) = res.bytes() {
+                                    if let Ok(img) = image::load_from_memory(&bytes) {
+                                        let size = [img.width() as _, img.height() as _];
+                                        let pixels = img.to_rgba8();
+                                        let pixels: Vec<egui::Color32> = pixels
+                                            .chunks_exact(4)
+                                            .map(|p| egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
+                                            .collect();
+
+                                        let mut color_image = egui::ColorImage {
+                                            size,
+                                            pixels,
+                                        };
+
+                                        if !is_installed {
+                                            color_to_grayscale(&mut color_image.pixels);
+                                        }
+
+                                        let _ = tx.send(WorkerResponse::ImageFetched(app_name, color_image));
+                                        ctx_clone.request_repaint();
+                                    }
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                    }
                     WorkerMsg::RefreshLibrary => {
                         match client.get_library_items() {
                             Ok(items) => {
@@ -132,6 +173,7 @@ impl LegendaryApp {
                     }
                     WorkerMsg::Logout => {
                         let _ = crate::auth::get_config_dir().map(|d| {
+                            let _ = std::fs::remove_file(d.join("user.json"));
                             let _ = std::fs::remove_file(d.join("token.json"));
                         });
                         // Clear client token too if needed
@@ -146,6 +188,7 @@ impl LegendaryApp {
             installed_games: crate::auth::load_installed_games(),
             assets: Vec::new(),
             selected_game: None,
+            images: HashMap::new(),
             auth_code: String::new(),
             status_message: "Welcome to Legendary Rust".to_string(),
             current_view: View::Auth,
@@ -174,6 +217,10 @@ impl eframe::App for LegendaryApp {
                 WorkerResponse::AssetsFetched(assets) => {
                     self.assets = assets;
                 }
+                WorkerResponse::ImageFetched(app_name, image) => {
+                    let name = format!("{}_art", app_name);
+                    self.images.insert(app_name, egui_extras::RetainedImage::from_color_image(name, image));
+                }
                 WorkerResponse::Error(e) => {
                     self.status_message = format!("Error: {}", e);
                 }
@@ -194,6 +241,7 @@ impl eframe::App for LegendaryApp {
                     let _ = self.tx.send(WorkerMsg::Logout);
                     self.token = None;
                     self.library.clear();
+                    self.images.clear();
                     self.status_message = "Logged out".to_string();
                     self.current_view = View::Auth;
                 }
@@ -261,24 +309,53 @@ impl LegendaryApp {
         }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for item in &self.library {
-                let title = item.metadata.as_ref()
-                    .and_then(|m| m.get("title"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or(&item.app_name);
-
-                ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                for item in &self.library {
                     let is_installed = self.installed_games.iter().any(|g| g.app_name == item.app_name);
-                    if is_installed {
-                        ui.label("✅");
-                    }
-                    if ui.button(title).clicked() {
-                        let _ = self.tx.send(WorkerMsg::FetchAssets);
-                        let _ = self.tx.send(WorkerMsg::FetchGameInfo(item.namespace.clone(), item.catalog_item_id.clone()));
-                        self.status_message = "Fetching game info...".to_string();
-                    }
-                });
-            }
+
+                    let local_meta = crate::auth::load_local_metadata(&item.app_name);
+                    let title = local_meta.as_ref()
+                        .map(|m| m.app_title.clone())
+                        .or_else(|| item.metadata.as_ref()
+                            .and_then(|m| m.get("title"))
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string()))
+                        .unwrap_or_else(|| item.app_name.clone());
+
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            if let Some(img) = self.images.get(&item.app_name) {
+                                let size = img.size_vec2();
+                                let ratio = size.x / size.y;
+                                img.show_max_size(ui, egui::vec2(100.0 * ratio, 100.0));
+                            } else {
+                                // Trigger fetch if not present
+                                if let Some(meta) = local_meta {
+                                    if let Some(first_img) = meta.metadata.key_images.get(0) {
+                                        let _ = self.tx.send(WorkerMsg::FetchImage(item.app_name.clone(), first_img.url.clone(), is_installed));
+                                    }
+                                }
+                                ui.allocate_space(egui::vec2(70.0, 100.0));
+                            }
+
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    if is_installed {
+                                        ui.label("✅");
+                                    }
+                                    if ui.button(egui::RichText::new(title).strong().size(18.0)).clicked() {
+                                        let _ = self.tx.send(WorkerMsg::FetchAssets);
+                                        let _ = self.tx.send(WorkerMsg::FetchGameInfo(item.namespace.clone(), item.catalog_item_id.clone()));
+                                        self.status_message = "Fetching game info...".to_string();
+                                    }
+                                });
+                                ui.label(format!("ID: {}", item.app_name));
+                            });
+                        });
+                    });
+                    ui.add_space(8.0);
+                }
+            });
         });
     }
 
