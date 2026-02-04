@@ -54,7 +54,13 @@ impl LegendaryApp {
         let ctx_clone = cc.egui_ctx.clone();
         // Spawn worker thread
         std::thread::spawn(move || {
-            let mut client = EgsClient::new();
+            let mut client = match EgsClient::new() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(WorkerResponse::Error(format!("Failed to initialize client: {}", e)));
+                    return;
+                }
+            };
 
             // Try initial load
             if let Ok(saved_token) = crate::auth::load_token() {

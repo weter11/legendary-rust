@@ -10,25 +10,24 @@ pub struct EgsClient {
 }
 
 impl EgsClient {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         let user_agent = "UELauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit".to_string();
         let user_basic = "34a02cf8f4414e29b15921876da36f9a".to_string();
         let pw_basic = "daafbccc737745039dffe53d94fc76cf".to_string();
 
         let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_str(&user_agent).unwrap());
+        headers.insert(USER_AGENT, HeaderValue::from_str(&user_agent)?);
 
         let client = reqwest::blocking::Client::builder()
             .default_headers(headers)
-            .build()
-            .unwrap();
+            .build()?;
 
-        Self {
+        Ok(Self {
             client,
             user_basic,
             pw_basic,
             access_token: None,
-        }
+        })
     }
 
     pub fn get_auth_url() -> String {
@@ -86,8 +85,9 @@ impl EgsClient {
                 url.push_str(&format!("&cursor={}", c));
             }
 
+            let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
             let response = self.client.get(&url)
-                .header(AUTHORIZATION, format!("bearer {}", self.access_token.as_ref().unwrap()))
+                .header(AUTHORIZATION, format!("bearer {}", token))
                 .send()?;
 
             let library_response: LibraryResponse = response.json()?;
@@ -107,9 +107,10 @@ impl EgsClient {
     }
 
     pub fn get_game_assets(&self, platform: &str) -> Result<Vec<Asset>> {
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
         let url = format!("https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/{}", platform);
         let response = self.client.get(&url)
-            .header(AUTHORIZATION, format!("bearer {}", self.access_token.as_ref().unwrap()))
+            .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
         let assets: Vec<Asset> = response.json()?;
@@ -117,10 +118,11 @@ impl EgsClient {
     }
 
     pub fn get_game_info(&self, namespace: &str, catalog_item_id: &str) -> Result<GameInfo> {
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
         let url = format!("https://catalog-public-service-prod06.ol.epicgames.com/catalog/api/shared/namespace/{}/bulk/items", namespace);
         let response = self.client.get(&url)
             .query(&[("id", catalog_item_id)])
-            .header(AUTHORIZATION, format!("bearer {}", self.access_token.as_ref().unwrap()))
+            .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
         let j: serde_json::Value = response.json()?;
