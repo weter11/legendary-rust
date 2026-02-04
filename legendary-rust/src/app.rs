@@ -9,8 +9,9 @@ use crate::models::Asset;
 use crate::models::InstalledGame;
 
 use std::sync::mpsc::{channel, Receiver, Sender};
-
 use std::collections::HashMap;
+
+use crate::config::{AppConfig, CompatibilityTool};
 
 pub struct LegendaryApp {
     token: Option<OAuthToken>,
@@ -20,6 +21,7 @@ pub struct LegendaryApp {
     selected_game: Option<GameInfo>,
     selected_app_name: Option<String>,
     images: HashMap<(String, String), egui_extras::RetainedImage>, // (app_name, type)
+    config: AppConfig,
     auth_code: String,
     status_message: String,
     current_view: View,
@@ -59,6 +61,7 @@ enum View {
     Auth,
     Library,
     GameDetail,
+    Settings,
 }
 
 fn color_to_grayscale(pixels: &mut [egui::Color32]) {
@@ -232,6 +235,7 @@ impl LegendaryApp {
             selected_game: None,
             selected_app_name: None,
             images: HashMap::new(),
+            config: AppConfig::load(),
             auth_code: String::new(),
             status_message: "Welcome to Legendary Rust".to_string(),
             current_view: View::Auth,
@@ -275,6 +279,9 @@ impl eframe::App for LegendaryApp {
             if ui.button("Library").clicked() {
                 self.current_view = View::Library;
             }
+            if ui.button("Settings").clicked() {
+                self.current_view = View::Settings;
+            }
             if self.token.is_none() {
                 if ui.button("Login").clicked() {
                     self.current_view = View::Auth;
@@ -296,6 +303,7 @@ impl eframe::App for LegendaryApp {
                 View::Auth => self.show_auth_view(ui),
                 View::Library => self.show_library_view(ui),
                 View::GameDetail => self.show_game_detail_view(ui),
+                View::Settings => self.show_settings_view(ui),
             }
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -469,8 +477,87 @@ impl LegendaryApp {
                         if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == app_name) {
                             ui.label(format!("Installed at: {}", installed.install_path));
                         }
+
+                        let settings = self.config.games.get(&app_name);
+                        let mut save_path_to_set = None;
+
+                        if let Some(s) = settings {
+                            if let Some(save_path) = &s.save_path {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("Save path: {}", save_path.to_string_lossy()));
+                                    if ui.button("📁").clicked() {
+                                        let _ = open::that(save_path);
+                                    }
+                                });
+                            } else {
+                                if ui.button("Set Save Path").clicked() {
+                                    save_path_to_set = rfd::FileDialog::new().pick_folder();
+                                }
+                            }
+                            let hours = s.play_time_seconds / 3600;
+                            let mins = (s.play_time_seconds % 3600) / 60;
+                            ui.label(format!("Time in game: {}h {}m", hours, mins));
+                        } else {
+                            if ui.button("Set Save Path").clicked() {
+                                save_path_to_set = rfd::FileDialog::new().pick_folder();
+                            }
+                        }
+
+                        if let Some(path) = save_path_to_set {
+                            self.config.games.entry(app_name.clone()).or_default().save_path = Some(path);
+                            let _ = self.config.save();
+                        }
                     });
                 });
+
+                if cfg!(target_os = "linux") {
+                    ui.add_space(10.0);
+                    ui.group(|ui| {
+                        ui.label("Compatibility Tool:");
+                        let mut changed = false;
+                        let game_settings = self.config.games.entry(app_name.clone()).or_default();
+                        ui.horizontal(|ui| {
+                            if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::SteamProton), "Steam Proton").changed() { changed = true; }
+                            if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::CustomProtonWine), "Custom Proton/Wine").changed() { changed = true; }
+                            if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::SystemWine), "System Wine").changed() { changed = true; }
+                        });
+
+                        match game_settings.compatibility_tool {
+                            Some(CompatibilityTool::SteamProton) => {
+                                let protons = crate::config::find_steam_protons();
+                                egui::ComboBox::from_label("Proton Version")
+                                    .selected_text(game_settings.custom_compatibility_path.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy()).unwrap_or_else(|| "Select Proton".into()))
+                                    .show_ui(ui, |ui| {
+                                        for p in protons {
+                                            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                            if ui.selectable_value(&mut game_settings.custom_compatibility_path, Some(p), name).changed() { changed = true; }
+                                        }
+                                    });
+                            }
+                            Some(CompatibilityTool::CustomProtonWine) => {
+                                let wines = crate::config::find_custom_wines();
+                                egui::ComboBox::from_label("Wine/Proton Version")
+                                    .selected_text(game_settings.custom_compatibility_path.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy()).unwrap_or_else(|| "Select Tool".into()))
+                                    .show_ui(ui, |ui| {
+                                        for w in wines {
+                                            let name = w.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                            if ui.selectable_value(&mut game_settings.custom_compatibility_path, Some(w), name).changed() { changed = true; }
+                                        }
+                                        if ui.button("Custom Path...").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                                game_settings.custom_compatibility_path = Some(path);
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                            }
+                            _ => {}
+                        }
+                        if changed {
+                            let _ = self.config.save();
+                        }
+                    });
+                }
 
                 if let Some(meta) = &local_meta {
                     if let Some(dlcs) = &meta.metadata.dlc_item_list {
@@ -512,7 +599,36 @@ impl LegendaryApp {
                                         let exe_path = path.join(filename);
                                         if exe_path.exists() {
                                             self.status_message = format!("Launching: {:?}", exe_path);
-                                            let _ = std::process::Command::new(exe_path).spawn();
+                                        let mut cmd = if cfg!(target_os = "linux") {
+                                            let game_settings = self.config.games.get(&app_name);
+                                            let mut c = match game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
+                                                Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) => {
+                                                    if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
+                                                        let mut p = path.clone();
+                                                        p.push("proton"); // Typical proton entry point
+                                                        if !p.exists() {
+                                                            p.pop();
+                                                            p.push("bin/wine");
+                                                        }
+                                                        let mut command = std::process::Command::new(p);
+                                                        command.arg("run");
+                                                        command
+                                                    } else {
+                                                        std::process::Command::new("wine")
+                                                    }
+                                                }
+                                                Some(CompatibilityTool::SystemWine) => {
+                                                    std::process::Command::new("wine")
+                                                }
+                                                None => std::process::Command::new("wine"),
+                                            };
+                                            c.arg(exe_path);
+                                            c
+                                        } else {
+                                            std::process::Command::new(exe_path)
+                                        };
+
+                                        let _ = cmd.spawn();
                                             found = true;
                                             break 'search;
                                         }
@@ -529,11 +645,51 @@ impl LegendaryApp {
                         }
                     }
 
-                    if ui.button("Install").clicked() {
-                        self.status_message = "Install not implemented yet".to_string();
+                    let is_installed = self.installed_games.iter().any(|g| g.app_name == app_name);
+                    if !is_installed {
+                        if ui.button("Install").clicked() {
+                            self.status_message = "Install not implemented yet".to_string();
+                        }
+                    } else {
+                        if ui.button("Verify").clicked() {
+                            self.status_message = "Verify not implemented yet".to_string();
+                        }
+                        if ui.button("Repair").clicked() {
+                            self.status_message = "Repair not implemented yet".to_string();
+                        }
+                        if ui.button("Uninstall").clicked() {
+                            self.status_message = "Uninstall not implemented yet".to_string();
+                        }
                     }
                 });
             });
+        }
+    }
+
+    fn show_settings_view(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Global Settings");
+        ui.separator();
+
+        ui.label("Game Library Paths:");
+        let mut to_remove = None;
+        for (i, path) in self.config.global.game_paths.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(path.to_string_lossy());
+                if ui.button("Remove").clicked() {
+                    to_remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = to_remove {
+            self.config.global.game_paths.remove(i);
+            let _ = self.config.save();
+        }
+
+        if ui.button("Add Path").clicked() {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                self.config.global.game_paths.push(path);
+                let _ = self.config.save();
+            }
         }
     }
 }
