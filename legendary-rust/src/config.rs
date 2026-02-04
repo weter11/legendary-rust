@@ -30,6 +30,8 @@ pub struct GameSettings {
     pub save_path: Option<PathBuf>,
     #[serde(default)]
     pub start_params: String,
+    #[serde(default)]
+    pub play_offline: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

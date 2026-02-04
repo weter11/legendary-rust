@@ -70,6 +70,10 @@ enum WorkerMsg {
         app_name: String,
         install_path: std::path::PathBuf,
     },
+    ScanGames {
+        library: Vec<LibraryItem>,
+        search_paths: Vec<std::path::PathBuf>,
+    },
 }
 
 enum WorkerResponse {
@@ -87,6 +91,7 @@ enum WorkerResponse {
     TaskFinished(String),
     CloudSyncConflict(String, Vec<crate::models::CloudSaveFile>),
     InstallInfoFetched(crate::models::InstallInfo),
+    GamesScanned(Vec<InstalledGame>),
 }
 
 #[derive(PartialEq)]
@@ -421,6 +426,13 @@ impl LegendaryApp {
                         let _ = tx.send(WorkerResponse::TaskFinished(format!("Installation of {} complete", app_name)));
                         ctx_clone.request_repaint();
                     }
+                    WorkerMsg::ScanGames { library, search_paths } => {
+                        let _ = tx.send(WorkerResponse::TaskProgress("Scanning for games...".to_string(), 0.0));
+                        let installed = crate::auth::scan_and_import_games(&library, &search_paths);
+                        let _ = tx.send(WorkerResponse::GamesScanned(installed));
+                        let _ = tx.send(WorkerResponse::TaskFinished("Scan complete".to_string()));
+                        ctx_clone.request_repaint();
+                    }
                 }
             }
         });
@@ -495,6 +507,9 @@ impl eframe::App for LegendaryApp {
                 WorkerResponse::InstallInfoFetched(info) => {
                     self.install_info = Some(info);
                     self.current_view = View::InstallDialog;
+                }
+                WorkerResponse::GamesScanned(games) => {
+                    self.installed_games = games;
                 }
             }
         }
@@ -583,6 +598,13 @@ impl LegendaryApp {
             if ui.button("Refresh").clicked() {
                 self.installed_games = crate::auth::load_installed_games();
                 let _ = self.tx.send(WorkerMsg::RefreshLibrary);
+
+                if !self.config.global.game_paths.is_empty() {
+                    let _ = self.tx.send(WorkerMsg::ScanGames {
+                        library: self.library.clone(),
+                        search_paths: self.config.global.game_paths.clone(),
+                    });
+                }
             }
         });
 
@@ -645,10 +667,6 @@ impl LegendaryApp {
                                         ui.label(format!("ID: {}", item.app_name));
                                         if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == item.app_name) {
                                             ui.label(format!("| v{}", installed.version));
-                                            let size_gb = installed.install_size as f32 / (1024.0 * 1024.0 * 1024.0);
-                                            if size_gb > 0.0 {
-                                                ui.label(format!("| {:.2} GB", size_gb));
-                                            }
                                         }
                                     });
                             });
@@ -714,10 +732,14 @@ impl LegendaryApp {
                             ui.label(format!("Available Version: {}", asset.build_version));
                         }
 
-                        if let Some(meta) = &local_meta {
+                        let installed_entry = self.installed_games.iter().find(|g| g.app_name == app_name);
+                        if let Some(installed) = installed_entry {
+                            let size_gb = installed.install_size as f32 / (1024.0 * 1024.0 * 1024.0);
+                            ui.label(format!("Game Size: {:.2} GB", size_gb));
+                        } else if let Some(meta) = &local_meta {
                             if let Some(attrs) = &meta.metadata.custom_attributes {
                                 if let Some(size) = attrs.get("MaxSizeMB") {
-                                    ui.label(format!("Installation Size: {} MB", size.value));
+                                    ui.label(format!("Game Size: {} MB (estimated)", size.value));
                                 }
                             }
                             if let Some(release_info) = &meta.metadata.release_info {
@@ -839,12 +861,18 @@ impl LegendaryApp {
 
                 ui.add_space(10.0);
                 ui.group(|ui| {
-                    ui.label("Additional Parameters:");
                     let mut changed = false;
                     let game_settings = self.config.games.entry(app_name.clone()).or_default();
+
+                    ui.label("Additional Parameters:");
                     if ui.text_edit_singleline(&mut game_settings.start_params).changed() {
                         changed = true;
                     }
+
+                    if ui.checkbox(&mut game_settings.play_offline, "Play Offline").changed() {
+                        changed = true;
+                    }
+
                     if changed {
                         let _ = self.config.save();
                     }
@@ -914,6 +942,9 @@ impl LegendaryApp {
                                                 };
                                                 c.arg(exe_path);
                                                 if let Some(settings) = game_settings {
+                                                if settings.play_offline {
+                                                    c.arg("-offline");
+                                                }
                                                     for param in settings.start_params.split_whitespace() {
                                                         c.arg(param);
                                                     }
@@ -922,6 +953,9 @@ impl LegendaryApp {
                                             } else {
                                                 let mut command = std::process::Command::new(exe_path);
                                                 if let Some(settings) = self.config.games.get(&app_name) {
+                                                if settings.play_offline {
+                                                    command.arg("-offline");
+                                                }
                                                     for param in settings.start_params.split_whitespace() {
                                                         command.arg(param);
                                                     }

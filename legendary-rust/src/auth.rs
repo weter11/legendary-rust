@@ -97,6 +97,83 @@ pub fn load_local_metadata(app_name: &str) -> Option<crate::models::LocalGameMet
     None
 }
 
+pub fn scan_and_import_games(library: &[crate::models::LibraryItem], search_paths: &[PathBuf]) -> Vec<crate::models::InstalledGame> {
+    let mut installed = load_installed_games();
+    let mut changed = false;
+
+    for search_path in search_paths {
+        if let Ok(entries) = std::fs::read_dir(search_path) {
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type() {
+                    if file_type.is_dir() {
+                        let folder_name = entry.file_name().to_string_lossy().to_string();
+
+                        // Check if this folder matches any library item
+                        for item in library {
+                            if installed.iter().any(|g| g.app_name == item.app_name) {
+                                continue;
+                            }
+
+                            let mut matches = folder_name == item.app_name;
+
+                            // Check local metadata for FolderName
+                            if !matches {
+                                if let Some(meta) = load_local_metadata(&item.app_name) {
+                                    if let Some(attrs) = meta.metadata.custom_attributes {
+                                        if let Some(folder_attr) = attrs.get("FolderName") {
+                                            if folder_attr.value == folder_name {
+                                                matches = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if matches {
+                                let local_meta = load_local_metadata(&item.app_name);
+                                let title = local_meta.as_ref()
+                                    .map(|m| m.app_title.clone())
+                                    .unwrap_or_else(|| item.app_name.clone());
+
+                                let new_game = crate::models::InstalledGame {
+                                    app_name: item.app_name.clone(),
+                                    install_path: entry.path().to_string_lossy().to_string(),
+                                    title,
+                                    version: "0.0.0".to_string(), // Placeholder, might need better way to get version
+                                    install_size: get_dir_size(&entry.path()),
+                                    download_size: 0,
+                                };
+                                installed.push(new_game);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if changed {
+        let _ = save_installed_games(&installed);
+    }
+
+    installed
+}
+
+pub fn save_installed_games(games: &[crate::models::InstalledGame]) -> anyhow::Result<()> {
+    let config_dir = get_config_dir().ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
+    let path = config_dir.join("installed.json");
+
+    let mut map = std::collections::HashMap::new();
+    for game in games {
+        map.insert(game.app_name.clone(), game.clone());
+    }
+
+    let json = serde_json::to_string_pretty(&map)?;
+    fs::write(path, json)?;
+    Ok(())
+}
+
 pub fn get_manifest_path(app_name: &str, catalog_item_id: &str) -> Option<PathBuf> {
     let mut p = get_config_dir()?;
     p.push("manifests");
