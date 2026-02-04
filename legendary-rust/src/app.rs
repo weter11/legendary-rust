@@ -219,6 +219,13 @@ impl LegendaryApp {
         ui.heading("Authentication");
         ui.label(&self.status_message);
 
+        ui.separator();
+        ui.label("How to log in:");
+        ui.label("1. Click the button below to open the Epic Games login page in your browser.");
+        ui.label("2. After logging in, you will see a JSON response containing 'authorizationCode'.");
+        ui.label("3. Copy that code and paste it into the field below.");
+        ui.label("4. Click 'Log In' to complete the process.");
+
         if ui.button("Open Login URL").clicked() {
             let url = crate::api::EgsClient::get_auth_url();
             let _ = open::that(url);
