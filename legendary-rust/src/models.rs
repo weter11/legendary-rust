@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LibraryItem {
+    #[serde(rename = "appName")]
     pub app_name: String,
+    #[serde(rename = "catalogItemId")]
     pub catalog_item_id: String,
     pub namespace: String,
     pub metadata: Option<serde_json::Value>,

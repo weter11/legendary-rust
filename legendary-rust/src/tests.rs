@@ -5,8 +5,8 @@ mod tests {
     #[test]
     fn test_library_item_deserialization() {
         let json = r#"{
-            "app_name": "Anemone",
-            "catalog_item_id": "item_id",
+            "appName": "Anemone",
+            "catalogItemId": "item_id",
             "namespace": "ns",
             "metadata": {
                 "title": "World of Goo"

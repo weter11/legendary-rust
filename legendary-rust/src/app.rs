@@ -185,15 +185,18 @@ impl eframe::App for LegendaryApp {
             if ui.button("Library").clicked() {
                 self.current_view = View::Library;
             }
-            if ui.button("Login").clicked() {
-                self.current_view = View::Auth;
-            }
-            if ui.button("Logout").clicked() {
-                let _ = self.tx.send(WorkerMsg::Logout);
-                self.token = None;
-                self.library.clear();
-                self.status_message = "Logged out".to_string();
-                self.current_view = View::Auth;
+            if self.token.is_none() {
+                if ui.button("Login").clicked() {
+                    self.current_view = View::Auth;
+                }
+            } else {
+                if ui.button("Logout").clicked() {
+                    let _ = self.tx.send(WorkerMsg::Logout);
+                    self.token = None;
+                    self.library.clear();
+                    self.status_message = "Logged out".to_string();
+                    self.current_view = View::Auth;
+                }
             }
         });
 
