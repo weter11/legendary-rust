@@ -9,7 +9,7 @@ license = "GPL-3.0-or-later"
 [package.metadata.deb]
 maintainer = "Legendary Team <maintainer@example.com>"
 copyright = "2023, Legendary Team"
-license-file = ["../LICENSE", "usr/share/doc/legendary-rust/copyright", "644"]
+license-file = ["../LICENSE", "0"]
 extended-description = """
 Legendary is an open-source game launcher that can download and install games from the Epic Games platform.
 This is a Rust reimplementation with an egui-based graphical interface.
