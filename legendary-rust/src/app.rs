@@ -885,20 +885,33 @@ impl LegendaryApp {
             let local_meta = crate::auth::load_local_metadata(&app_name);
             let path = std::path::PathBuf::from(&installed.install_path);
             let mut found = false;
-            let mut possible_names = vec![app_name.clone()];
-            if let Some(meta) = &local_meta {
-                if let Some(attrs) = &meta.metadata.custom_attributes {
-                    if let Some(folder) = attrs.get("FolderName") {
-                        possible_names.push(folder.value.clone());
+
+            let game_settings = self.config.games.get(&app_name);
+            let custom_exe = game_settings.and_then(|s| s.custom_exe_path.clone());
+
+            let mut possible_exes = Vec::new();
+            if let Some(ce) = custom_exe {
+                possible_exes.push(ce);
+            } else {
+                let mut possible_names = vec![app_name.clone()];
+                if let Some(meta) = &local_meta {
+                    if let Some(attrs) = &meta.metadata.custom_attributes {
+                        if let Some(folder) = attrs.get("FolderName") {
+                            possible_names.push(folder.value.clone());
+                        }
+                    }
+                }
+
+                for name in possible_names {
+                    for ext in &["exe", "sh", ""] {
+                        let filename = if ext.is_empty() { name.clone() } else { format!("{}.{}", name, ext) };
+                        possible_exes.push(path.join(filename));
                     }
                 }
             }
 
-            'search: for name in possible_names {
-                for ext in &["exe", "sh", ""] {
-                    let filename = if ext.is_empty() { name.clone() } else { format!("{}.{}", name, ext) };
-                    let exe_path = path.join(filename);
-                    if exe_path.exists() {
+            'search: for exe_path in possible_exes {
+                if exe_path.exists() {
                         self.status_message = format!("Launching: {:?}", exe_path);
                         let mut cmd = if std::env::consts::OS == "linux" {
                             let game_settings = self.config.games.get(&app_name);
@@ -982,7 +995,6 @@ impl LegendaryApp {
                         }
                         break 'search;
                     }
-                }
             }
             if !found {
                 self.status_message = format!("Could not find executable in {}", installed.install_path);
@@ -1201,6 +1213,22 @@ impl LegendaryApp {
                         changed = true;
                     }
 
+                    ui.add_space(10.0);
+                    ui.label("Custom Executable Path (optional):");
+                    ui.horizontal(|ui| {
+                        let mut exe_str = game_settings.custom_exe_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                        if ui.text_edit_singleline(&mut exe_str).changed() {
+                            game_settings.custom_exe_path = if exe_str.is_empty() { None } else { Some(std::path::PathBuf::from(exe_str)) };
+                            changed = true;
+                        }
+                        if ui.button("Browse...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                game_settings.custom_exe_path = Some(path);
+                                changed = true;
+                            }
+                        }
+                    });
+
                     if changed {
                         let _ = self.config.save();
                     }
@@ -1318,17 +1346,20 @@ impl LegendaryApp {
     fn show_save_sync_view(&mut self, ui: &mut egui::Ui) {
         let status_data = self.save_sync_status.clone();
         if let Some(status) = status_data {
-            ui.heading(format!("Cloud Save Sync: {}", status.app_name));
+            ui.horizontal(|ui| {
+                if ui.button("⬅ Back").clicked() {
+                    self.save_sync_status = None;
+                    self.current_view = View::GameDetail;
+                }
+                ui.heading(format!("Cloud Save Sync: {}", status.app_name));
+            });
+            ui.add_space(10.0);
 
             if status.loading {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new());
                     ui.label("Fetching save metadata...");
                 });
-                if ui.button("Cancel").clicked() {
-                    self.save_sync_status = None;
-                    self.current_view = View::GameDetail;
-                }
                 return;
             }
 
@@ -1336,9 +1367,6 @@ impl LegendaryApp {
                 ui.group(|ui| {
                     ui.colored_label(egui::Color32::LIGHT_RED, egui::RichText::new("Failed to fetch cloud save metadata").strong());
                     ui.label(err);
-                });
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
                     if ui.button("Retry").clicked() {
                         if let Some(item) = self.library.iter().find(|i| i.app_name == status.app_name) {
                             let save_path = self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone());
@@ -1357,39 +1385,95 @@ impl LegendaryApp {
                             });
                         }
                     }
-                    if ui.button("Back").clicked() {
-                        self.save_sync_status = None;
-                        self.current_view = View::GameDetail;
-                    }
                 });
                 return;
             }
 
-            ui.group(|ui| {
-                ui.horizontal(|ui| {
+            let can_upload = self.config.games.get(&status.app_name).and_then(|s| s.save_path.as_ref()).is_some();
+            let can_download = !status.files.is_empty();
+
+            ui.horizontal_top(|ui| {
+                let box_width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                let box_height = 250.0;
+
+                // Local Box
+                let local_frame = egui::Frame::group(ui.style())
+                    .rounding(5.0)
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
+
+                local_frame.show(ui, |ui| {
+                    ui.set_min_size(egui::vec2(box_width, box_height));
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new("Local Save:").strong());
-                        if let Some(t) = status.local_time {
-                            ui.label(format!("{}", t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S")));
-                        } else {
-                            ui.label("None");
-                        }
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::from_rgb(100, 100, 200), egui::RichText::new(" Local ").strong().background_color(egui::Color32::from_rgb(40, 40, 80)));
+                        });
+                        ui.add_space(10.0);
+                        ui.vertical_centered(|ui| {
+                            if let Some(t) = status.local_time {
+                                ui.label(t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string());
+                            } else {
+                                ui.label("No local save found");
+                            }
+                            ui.add_space(20.0);
+                            ui.label(egui::RichText::new("🖴").size(80.0));
+                            ui.add_space(20.0);
+
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                                if ui.add_enabled(can_upload, egui::Button::new(egui::RichText::new("Upload").strong()).min_size(egui::vec2(box_width - 20.0, 30.0))).clicked() {
+                                    if let (Some(item), Some(save_path)) = (self.library.iter().find(|i| i.app_name == status.app_name), self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone())) {
+                                        let _ = self.tx.send(WorkerMsg::UploadCloudSave {
+                                            app_name: status.app_name.clone(),
+                                            namespace: item.namespace.clone(),
+                                            save_path,
+                                        });
+                                    }
+                                }
+                            });
+                        });
                     });
+                });
 
-                    ui.add_space(50.0);
+                // Cloud Box
+                let cloud_frame = egui::Frame::group(ui.style())
+                    .rounding(5.0)
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
 
+                cloud_frame.show(ui, |ui| {
+                    ui.set_min_size(egui::vec2(box_width, box_height));
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new("Cloud Save:").strong());
-                        if let Some(t) = status.remote_time {
-                            ui.label(format!("{}", t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S")));
-                        } else {
-                            ui.label("None");
-                        }
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::from_rgb(100, 100, 200), egui::RichText::new(" Cloud ").strong().background_color(egui::Color32::from_rgb(40, 40, 80)));
+                        });
+                        ui.add_space(10.0);
+                        ui.vertical_centered(|ui| {
+                            if let Some(t) = status.remote_time {
+                                ui.label(t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string());
+                            } else {
+                                ui.label("No cloud save found");
+                            }
+                            ui.add_space(20.0);
+                            ui.label(egui::RichText::new("☁").size(80.0));
+                            ui.add_space(20.0);
+
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                                if ui.add_enabled(can_download, egui::Button::new(egui::RichText::new("Download").strong()).min_size(egui::vec2(box_width - 20.0, 30.0))).clicked() {
+                                    if let (Some(item), Some(save_path)) = (self.library.iter().find(|i| i.app_name == status.app_name), self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone())) {
+                                        let _ = self.tx.send(WorkerMsg::DownloadCloudSave {
+                                            app_name: status.app_name.clone(),
+                                            namespace: item.namespace.clone(),
+                                            save_path,
+                                        });
+                                    }
+                                }
+                            });
+                        });
                     });
                 });
             });
 
-            ui.add_space(10.0);
+            ui.add_space(20.0);
+
+            // Comparison message
             if let (Some(l), Some(r)) = (status.local_time, status.remote_time) {
                 let diff = (l - r).num_seconds().abs();
                 if diff < 2 {
@@ -1399,63 +1483,57 @@ impl LegendaryApp {
                 } else {
                     ui.colored_label(egui::Color32::YELLOW, format!("⚠ Cloud save is newer (by {}).", format_duration(r - l)));
                 }
-            } else if status.local_time.is_some() {
-                ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ No cloud save found. You can upload your local save.");
-            } else if status.remote_time.is_some() {
-                ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ No local save found. You can download the cloud save.");
-            } else {
-                ui.label("No saves found on either side.");
             }
 
             ui.add_space(10.0);
-            ui.label("Cloud files:");
-            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                for file in &status.files {
-                    ui.group(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(&file.file_name);
-                            ui.label(format!("({} bytes)", file.length));
-                        });
+
+            // Settings Box
+            let settings_frame = egui::Frame::group(ui.style())
+                .rounding(5.0)
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
+
+            settings_frame.show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::from_rgb(100, 100, 200), egui::RichText::new(" Settings ").strong().background_color(egui::Color32::from_rgb(40, 40, 80)));
                     });
-                }
-            });
+                    ui.add_space(10.0);
 
-            ui.add_space(20.0);
-            let can_upload = self.config.games.get(&status.app_name).and_then(|s| s.save_path.as_ref()).is_some();
-            let can_download = !status.files.is_empty();
+                    let game_settings = self.config.games.entry(status.app_name.clone()).or_default();
+                    let mut changed = false;
 
-            ui.horizontal(|ui| {
-                if ui.add_enabled(can_upload, egui::Button::new(egui::RichText::new("Upload local to Cloud").strong())).clicked() {
-                    if let (Some(item), Some(save_path)) = (self.library.iter().find(|i| i.app_name == status.app_name), self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone())) {
-                        let _ = self.tx.send(WorkerMsg::UploadCloudSave {
-                            app_name: status.app_name.clone(),
-                            namespace: item.namespace.clone(),
-                            save_path,
-                        });
+                    ui.horizontal(|ui| {
+                        ui.label("Enable sync");
+                        if ui.checkbox(&mut game_settings.cloud_sync_enabled, "Automatically synchronize saves with the cloud").changed() {
+                            changed = true;
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Saves path");
+                        let mut path_str = game_settings.save_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                        if ui.text_edit_singleline(&mut path_str).changed() {
+                            game_settings.save_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                            changed = true;
+                        }
+                        if ui.button("Browse...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                game_settings.save_path = Some(path);
+                                changed = true;
+                            }
+                        }
+                    });
+
+                    if ui.button("Resolve path").clicked() {
+                        // Placeholder for resolve logic if any
                     }
-                    self.save_sync_status = None;
-                    self.current_view = View::GameDetail;
-                }
-                if ui.add_enabled(can_download, egui::Button::new(egui::RichText::new("Download Cloud to PC").strong())).clicked() {
-                    if let (Some(item), Some(save_path)) = (self.library.iter().find(|i| i.app_name == status.app_name), self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone())) {
-                        let _ = self.tx.send(WorkerMsg::DownloadCloudSave {
-                            app_name: status.app_name.clone(),
-                            namespace: item.namespace.clone(),
-                            save_path,
-                        });
-                    }
-                    self.save_sync_status = None;
-                    self.current_view = View::GameDetail;
-                }
-                if ui.button("Cancel").clicked() {
-                    self.save_sync_status = None;
-                    self.current_view = View::GameDetail;
-                }
-            });
 
-            if !can_upload {
-                ui.colored_label(egui::Color32::YELLOW, "Set a local save path in game details to enable uploading.");
-            }
+                    if changed {
+                        let _ = self.config.save();
+                    }
+                });
+            });
         }
     }
 

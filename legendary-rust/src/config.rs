@@ -22,7 +22,7 @@ impl Default for GlobalSettings {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GameSettings {
     pub compatibility_tool: Option<CompatibilityTool>,
     pub custom_compatibility_path: Option<PathBuf>,
@@ -32,6 +32,29 @@ pub struct GameSettings {
     pub start_params: String,
     #[serde(default)]
     pub play_offline: bool,
+    #[serde(default)]
+    pub custom_exe_path: Option<PathBuf>,
+    #[serde(default = "default_true")]
+    pub cloud_sync_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for GameSettings {
+    fn default() -> Self {
+        Self {
+            compatibility_tool: None,
+            custom_compatibility_path: None,
+            play_time_seconds: 0,
+            save_path: None,
+            start_params: String::new(),
+            play_offline: false,
+            custom_exe_path: None,
+            cloud_sync_enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
