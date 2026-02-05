@@ -1526,7 +1526,50 @@ impl LegendaryApp {
                     });
 
                     if ui.button("Resolve path").clicked() {
-                        // Placeholder for resolve logic if any
+                        let mut resolved_path = None;
+                        let mut folder_hint = None;
+
+                        // Try to get folder hint from metadata
+                        let local_meta = crate::auth::load_local_metadata(&status.app_name);
+                        if let Some(meta) = local_meta {
+                            if let Some(attrs) = meta.metadata.custom_attributes {
+                                if let Some(attr) = attrs.get("CloudSaveFolder") {
+                                    folder_hint = Some(attr.value.clone());
+                                }
+                            }
+                        }
+
+                        if folder_hint.is_none() {
+                            folder_hint = Some(status.app_name.clone());
+                        }
+
+                        if let Some(hint) = folder_hint {
+                            if std::env::consts::OS == "linux" {
+                                if let Some(mut p) = get_default_compat_data_path() {
+                                    p.push("pfx/drive_c/users/steamuser/AppData/Local");
+                                    p.push(&hint);
+                                    if p.exists() {
+                                        resolved_path = Some(p);
+                                    } else {
+                                        // Try common variants
+                                        p.pop();
+                                        p.push(&hint.replace(" ", ""));
+                                        if p.exists() { resolved_path = Some(p); }
+                                    }
+                                }
+                            } else if std::env::consts::OS == "windows" {
+                                if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+                                    let mut p = std::path::PathBuf::from(local_app_data);
+                                    p.push(&hint);
+                                    if p.exists() { resolved_path = Some(p); }
+                                }
+                            }
+                        }
+
+                        if let Some(p) = resolved_path {
+                            game_settings.save_path = Some(p);
+                            changed = true;
+                        }
                     }
 
                     if changed {
