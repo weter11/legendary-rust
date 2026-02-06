@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod auth;
 mod config;
+mod manifest;
 mod models;
 #[cfg(test)]
 mod tests;
