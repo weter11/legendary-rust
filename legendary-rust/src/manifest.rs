@@ -44,6 +44,7 @@ pub struct FileManifest {
     pub hash: [u8; 20],
     pub chunk_parts: Vec<ChunkPart>,
     pub file_size: u64,
+    pub install_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -166,11 +167,14 @@ pub fn parse_manifest(data: &[u8]) -> anyhow::Result<Manifest> {
     }
 
     // Install tags
+    let mut file_install_tags = Vec::with_capacity(fml_count as usize);
     for _ in 0..fml_count {
         let tag_count = body_cursor.read_u32::<LittleEndian>()?;
+        let mut tags = Vec::with_capacity(tag_count as usize);
         for _ in 0..tag_count {
-            let _ = read_fstring(&mut body_cursor)?;
+            tags.push(read_fstring(&mut body_cursor)?);
         }
+        file_install_tags.push(tags);
     }
 
     // Chunk parts
@@ -203,9 +207,9 @@ pub fn parse_manifest(data: &[u8]) -> anyhow::Result<Manifest> {
     // Optional MD5/MIME type and SHA256 (depending on version)
     // We can skip these for now as we have enough for basic downloading and SHA1 verification.
 
-    for (((name, hash), parts), _flags) in filenames.into_iter().zip(file_hashes.into_iter()).zip(file_chunk_parts.into_iter()).zip(file_flags.into_iter()) {
+    for ((((name, hash), parts), tags), _flags) in filenames.into_iter().zip(file_hashes.into_iter()).zip(file_chunk_parts.into_iter()).zip(file_install_tags.into_iter()).zip(file_flags.into_iter()) {
         let file_size = parts.iter().map(|p| p.size as u64).sum();
-        files.insert(name.clone(), FileManifest { filename: name, hash, chunk_parts: parts, file_size });
+        files.insert(name.clone(), FileManifest { filename: name, hash, chunk_parts: parts, file_size, install_tags: tags });
     }
 
     Ok(Manifest { manifest_version, chunks, files })

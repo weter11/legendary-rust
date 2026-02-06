@@ -96,6 +96,7 @@ pub struct InstallInfo {
     pub download_size: u64,
     pub install_size: u64,
     pub free_space: u64,
+    pub available_tags: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -28,6 +28,7 @@ pub struct LegendaryApp {
     fetching_images: HashSet<(String, String)>,
     config: AppConfig,
     auth_code: String,
+    search_query: String,
     status_message: String,
     current_view: View,
     tx: Sender<WorkerMsg>,
@@ -37,6 +38,7 @@ pub struct LegendaryApp {
     running_processes: HashMap<String, std::process::Child>,
     save_sync_status: Option<SaveSyncStatus>,
     install_info: Option<crate::models::InstallInfo>,
+    selected_tags: HashSet<String>,
     current_task: Option<TaskStatus>,
 }
 
@@ -99,12 +101,14 @@ pub(crate) enum WorkerMsg {
     InstallGame {
         app_name: String,
         install_path: std::path::PathBuf,
+        selected_tags: Option<HashSet<String>>,
     },
     UninstallGame(String),
     ScanGames {
         library: Vec<LibraryItem>,
         search_paths: Vec<std::path::PathBuf>,
     },
+    EglSync,
     FetchGameToken(String),
 }
 
@@ -148,6 +152,7 @@ enum View {
     Settings,
     SaveSync,
     InstallDialog,
+    Tasks,
 }
 
 fn color_to_grayscale(pixels: &mut [egui::Color32]) {
@@ -628,6 +633,28 @@ impl LegendaryApp {
                     WorkerMsg::FetchInstallInfo { app_name, title } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Fetching install info for {}", app_name), progress: 0.0, is_paused: false });
 
+                        let mut available_tags = Vec::new();
+                        if let Ok(assets) = client.get_game_assets("Windows") {
+                            if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
+                                    if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
+                                        if let Ok(manifest_data) = client.download_manifest(url) {
+                                            if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
+                                                let mut tags = HashSet::new();
+                                                for file in manifest.files.values() {
+                                                    for tag in &file.install_tags {
+                                                        tags.insert(tag.clone());
+                                                    }
+                                                }
+                                                available_tags = tags.into_iter().collect();
+                                                available_tags.sort();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         let local_meta = crate::auth::load_local_metadata(&app_name);
                         let mut install_size = 0;
                         let mut download_size = 0;
@@ -670,11 +697,12 @@ impl LegendaryApp {
                             download_size,
                             install_size,
                             free_space: free,
+                            available_tags,
                         };
                         let _ = tx.send(WorkerResponse::InstallInfoFetched(info));
                         ctx_clone.request_repaint();
                     }
-                    WorkerMsg::InstallGame { app_name, install_path } => {
+                    WorkerMsg::InstallGame { app_name, install_path, selected_tags } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Preparing installation for {}", app_name), progress: 0.0, is_paused: false });
 
                         // Actual implementation: Create directory
@@ -713,7 +741,7 @@ impl LegendaryApp {
                         if let (Some(manifest_data), Some(base_url)) = (manifest_data_opt, base_url_opt) {
                             if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
                                 let downloader = crate::download::Downloader::new(base_url, tx.clone(), cancel.clone(), pause.clone());
-                                match downloader.download_game(&manifest, &install_path) {
+                                match downloader.download_game(&manifest, &install_path, selected_tags) {
                                     Ok(_) => success = true,
                                     Err(e) => {
                                         let _ = tx.send(WorkerResponse::Error(format!("Download failed: {}", e)));
@@ -777,6 +805,13 @@ impl LegendaryApp {
                         let _ = tx.send(WorkerResponse::TaskFinished("Scan complete".to_string()));
                         ctx_clone.request_repaint();
                     }
+                    WorkerMsg::EglSync => {
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: "Syncing with EGL...".to_string(), progress: 0.0, is_paused: false });
+                        let installed = crate::auth::scan_egl_manifests();
+                        let _ = tx.send(WorkerResponse::GamesScanned(installed));
+                        let _ = tx.send(WorkerResponse::TaskFinished("EGL Sync complete".to_string()));
+                        ctx_clone.request_repaint();
+                    }
                     WorkerMsg::FetchGameToken(app_name) => {
                         match client.get_game_token() {
                             Ok(token) => {
@@ -803,6 +838,7 @@ impl LegendaryApp {
             fetching_images: HashSet::new(),
             config: AppConfig::load(),
             auth_code: String::new(),
+            search_query: String::new(),
             status_message: "Welcome to Legendary Rust".to_string(),
             current_view: View::Auth,
             tx: worker_tx,
@@ -812,6 +848,7 @@ impl LegendaryApp {
             running_processes: HashMap::new(),
             save_sync_status: None,
             install_info: None,
+            selected_tags: HashSet::new(),
             current_task: None,
         }
     }
@@ -880,6 +917,7 @@ impl eframe::App for LegendaryApp {
                     });
                 }
                 WorkerResponse::InstallInfoFetched(info) => {
+                    self.selected_tags = info.available_tags.iter().cloned().collect();
                     self.install_info = Some(info);
                     self.current_view = View::InstallDialog;
                 }
@@ -922,6 +960,9 @@ impl eframe::App for LegendaryApp {
             if ui.selectable_label(self.current_view == View::Settings, "Settings").clicked() {
                 self.current_view = View::Settings;
             }
+            if ui.selectable_label(self.current_view == View::Tasks, "Tasks").clicked() {
+                self.current_view = View::Tasks;
+            }
             ui.add_space(10.0);
             if self.token.is_none() {
                 if ui.button("Login").clicked() {
@@ -950,6 +991,7 @@ impl eframe::App for LegendaryApp {
                 View::Settings => self.show_settings_view(ui),
                 View::SaveSync => self.show_save_sync_view(ui),
                 View::InstallDialog => self.show_install_dialog_view(ui),
+                View::Tasks => self.show_tasks_view(ui),
             }
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -968,6 +1010,39 @@ impl eframe::App for LegendaryApp {
 }
 
 impl LegendaryApp {
+    fn show_tasks_view(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Tasks");
+        ui.separator();
+
+        if let Some(task) = self.current_task.clone() {
+            ui.group(|ui| {
+                ui.label(format!("Active Task: {}", task.name));
+                ui.add(egui::ProgressBar::new(task.progress).show_percentage());
+                ui.horizontal(|ui| {
+                    if task.is_paused {
+                        if ui.button("Resume").clicked() {
+                            if let Some(t) = &mut self.current_task { t.is_paused = false; }
+                            self.worker_pause.store(false, Ordering::SeqCst);
+                            let _ = self.tx.send(WorkerMsg::ResumeTask);
+                        }
+                    } else {
+                        if ui.button("Pause").clicked() {
+                            if let Some(t) = &mut self.current_task { t.is_paused = true; }
+                            self.worker_pause.store(true, Ordering::SeqCst);
+                            let _ = self.tx.send(WorkerMsg::PauseTask);
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.worker_cancel.store(true, Ordering::SeqCst);
+                        let _ = self.tx.send(WorkerMsg::CancelTask);
+                    }
+                });
+            });
+        } else {
+            ui.label("No active tasks.");
+        }
+    }
+
     fn show_auth_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Authentication");
         ui.label(&self.status_message);
@@ -999,17 +1074,26 @@ impl LegendaryApp {
     fn show_library_view(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Library");
-            if ui.button("Refresh").clicked() {
-                self.installed_games = crate::auth::load_installed_games();
-                let _ = self.tx.send(WorkerMsg::RefreshLibrary);
-
-                if !self.config.global.game_paths.is_empty() {
-                    let _ = self.tx.send(WorkerMsg::ScanGames {
-                        library: self.library.clone(),
-                        search_paths: self.config.global.game_paths.clone(),
-                    });
-                }
+            ui.add_space(20.0);
+            ui.label("Search:");
+            ui.text_edit_singleline(&mut self.search_query);
+            if ui.button("Clear").clicked() {
+                self.search_query.clear();
             }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Refresh").clicked() {
+                    self.installed_games = crate::auth::load_installed_games();
+                    let _ = self.tx.send(WorkerMsg::RefreshLibrary);
+
+                    if !self.config.global.game_paths.is_empty() {
+                        let _ = self.tx.send(WorkerMsg::ScanGames {
+                            library: self.library.clone(),
+                            search_paths: self.config.global.game_paths.clone(),
+                        });
+                    }
+                }
+            });
         });
 
         if self.token.is_none() {
@@ -1020,8 +1104,6 @@ impl LegendaryApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.vertical(|ui| {
                 for item in &self.library {
-                    let is_installed = self.installed_games.iter().any(|g| g.app_name == item.app_name);
-
                     let local_meta = crate::auth::load_local_metadata(&item.app_name);
                     let title = local_meta.as_ref()
                         .map(|m| m.app_title.clone())
@@ -1030,6 +1112,12 @@ impl LegendaryApp {
                             .and_then(|t| t.as_str())
                             .map(|s| s.to_string()))
                         .unwrap_or_else(|| item.app_name.clone());
+
+                    if !self.search_query.is_empty() && !title.to_lowercase().contains(&self.search_query.to_lowercase()) && !item.app_name.to_lowercase().contains(&self.search_query.to_lowercase()) {
+                        continue;
+                    }
+
+                    let is_installed = self.installed_games.iter().any(|g| g.app_name == item.app_name);
 
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
@@ -1390,7 +1478,24 @@ impl LegendaryApp {
                             ui.add_space(10.0);
                             ui.collapsing("DLCs", |ui| {
                                 for dlc in dlcs {
-                                    ui.label(&dlc.title);
+                                    ui.horizontal(|ui| {
+                                        ui.label(&dlc.title);
+                                        let dlc_installed = self.installed_games.iter().any(|g| g.app_name == dlc.id);
+                                        if dlc_installed {
+                                            ui.label("✅ Installed");
+                                            if ui.button("Uninstall").clicked() {
+                                                let _ = self.tx.send(WorkerMsg::UninstallGame(dlc.id.clone()));
+                                            }
+                                        } else {
+                                            if ui.button("Install").clicked() {
+                                                // We need to fetch install info for DLC first
+                                                let _ = self.tx.send(WorkerMsg::FetchInstallInfo {
+                                                    app_name: dlc.id.clone(),
+                                                    title: dlc.title.clone(),
+                                                });
+                                            }
+                                        }
+                                    });
                                 }
                             });
                         }
@@ -1540,6 +1645,7 @@ impl LegendaryApp {
 
     fn show_install_dialog_view(&mut self, ui: &mut egui::Ui) {
         if let Some(info) = &self.install_info {
+            let app_name = info.app_name.clone();
             ui.heading(format!("Install {}", info.title));
             ui.add_space(10.0);
 
@@ -1563,6 +1669,23 @@ impl LegendaryApp {
                 ui.end_row();
             });
 
+            if !info.available_tags.is_empty() {
+                ui.add_space(20.0);
+                ui.heading("Selective Download:");
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    for tag in &info.available_tags {
+                        let mut selected = self.selected_tags.contains(tag);
+                        if ui.checkbox(&mut selected, tag).changed() {
+                            if selected {
+                                self.selected_tags.insert(tag.clone());
+                            } else {
+                                self.selected_tags.remove(tag);
+                            }
+                        }
+                    }
+                });
+            }
+
             ui.add_space(20.0);
             if info.free_space < info.install_size {
                 ui.colored_label(egui::Color32::RED, "⚠ Not enough disk space!");
@@ -1573,6 +1696,7 @@ impl LegendaryApp {
                     let _ = self.tx.send(WorkerMsg::InstallGame {
                         app_name: info.app_name.clone(),
                         install_path: info.install_path.clone(),
+                        selected_tags: Some(self.selected_tags.clone()),
                     });
                     self.current_view = View::GameDetail;
                 }
@@ -1823,6 +1947,11 @@ impl LegendaryApp {
     fn show_settings_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Global Settings");
         ui.separator();
+
+        if ui.button("Sync with Epic Games Launcher").clicked() {
+            let _ = self.tx.send(WorkerMsg::EglSync);
+        }
+        ui.add_space(10.0);
 
         ui.label("Game Library Paths:");
         let mut to_remove = None;

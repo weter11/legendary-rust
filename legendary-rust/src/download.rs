@@ -41,10 +41,15 @@ impl Downloader {
         self.cancel.load(Ordering::SeqCst)
     }
 
-    pub fn download_game(&self, manifest: &Manifest, install_path: &Path) -> Result<()> {
+    pub fn download_game(&self, manifest: &Manifest, install_path: &Path, selected_tags: Option<std::collections::HashSet<String>>) -> Result<()> {
         // Group files by chunks to avoid redundant downloads
         let mut chunk_to_files: std::collections::HashMap<[u32; 4], Vec<String>> = std::collections::HashMap::new();
         for (filename, file_manifest) in &manifest.files {
+            if let Some(tags) = &selected_tags {
+                if !file_manifest.install_tags.is_empty() && !file_manifest.install_tags.iter().any(|t| tags.contains(t)) {
+                    continue;
+                }
+            }
             for part in &file_manifest.chunk_parts {
                 chunk_to_files.entry(part.guid).or_default().push(filename.clone());
             }
