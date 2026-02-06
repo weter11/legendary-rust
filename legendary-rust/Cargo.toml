@@ -1,0 +1,50 @@
+[package]
+name = "legendary-rust"
+version = "0.1.0"
+edition = "2021"
+authors = ["Legendary Team"]
+description = "A free and open-source replacement for the Epic Games Launcher in Rust with egui UI"
+license = "GPL-3.0-or-later"
+
+[package.metadata.deb]
+maintainer = "Legendary Team <maintainer@example.com>"
+copyright = "2023, Legendary Team"
+license-file = ["../LICENSE", "0"]
+extended-description = """
+Legendary is an open-source game launcher that can download and install games from the Epic Games platform.
+This is a Rust reimplementation with an egui-based graphical interface.
+"""
+section = "games"
+priority = "optional"
+depends = "$auto, libgtk-3-0, libwebkit2gtk-4.1-0"
+assets = [
+    ["target/release/legendary-rust", "usr/bin/legendary-rust", "755"],
+]
+
+[dependencies]
+eframe = "0.22"
+egui = "0.22"
+egui_extras = { version = "0.22", features = ["image"] }
+image = "0.24"
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.7"
+rfd = "0.12"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.10"
+sha2 = "0.10"
+sha1 = "0.10"
+url = "2.4"
+urlencoding = "2.1"
+base64 = "0.21"
+chrono = "0.4"
+directories = "5.0"
+configparser = "3.0"
+open = "5.0"
+home = "0.5"
+fs2 = "0.4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3", features = ["winuser"] }
