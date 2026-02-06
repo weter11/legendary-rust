@@ -134,6 +134,31 @@ impl EgsClient {
         Ok(assets)
     }
 
+    pub fn download_manifest(&self, url: &str) -> Result<Vec<u8>> {
+        let response = self.client.get(url).send()?;
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to download manifest: {}", response.status()));
+        }
+        Ok(response.bytes()?.to_vec())
+    }
+
+    pub fn get_asset_manifest(&self, platform: &str, namespace: &str, catalog_item_id: &str, app_name: &str, label_name: &str) -> Result<serde_json::Value> {
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let url = format!("https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/v2/platform/{}/namespace/{}/catalogItem/{}/app/{}/label/{}",
+            platform, namespace, catalog_item_id, app_name, label_name);
+
+        let response = self.client.get(&url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to fetch asset manifest info: {}", response.status()));
+        }
+
+        let json: serde_json::Value = response.json()?;
+        Ok(json)
+    }
+
     pub fn get_game_info(&self, namespace: &str, catalog_item_id: &str) -> Result<GameInfo> {
         let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
         let url = format!("https://catalog-public-service-prod06.ol.epicgames.com/catalog/api/shared/namespace/{}/bulk/items", namespace);
