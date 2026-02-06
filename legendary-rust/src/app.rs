@@ -57,7 +57,7 @@ pub struct SaveSyncStatus {
     pub error: Option<String>,
 }
 
-enum WorkerMsg {
+pub(crate) enum WorkerMsg {
     Login(String),
     RefreshLibrary,
     FetchGameInfo(String, String), // namespace, catalog_item_id
@@ -108,7 +108,7 @@ enum WorkerMsg {
     FetchGameToken(String),
 }
 
-enum WorkerResponse {
+pub(crate) enum WorkerResponse {
     LoggedIn(OAuthToken),
     LibraryFetched(Vec<LibraryItem>),
     GameInfoFetched(GameInfo),
@@ -409,12 +409,39 @@ impl LegendaryApp {
                         let installed = crate::auth::load_installed_games();
                         let game = installed.iter().find(|g| g.app_name == app_name);
 
-                        if let (Some(game), Some(manifest_path)) = (game, crate::auth::get_manifest_path(&app_name, &catalog_item_id)) {
-                            let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Reading manifest at {:?}", manifest_path), progress: 0.0, is_paused: false });
+                        let manifest_path_opt = crate::auth::get_manifest_path(&app_name, &catalog_item_id);
 
+                        if let Some(game) = game {
                             let mut manifest_opt = None;
-                            if let Ok(data) = std::fs::read(&manifest_path) {
-                                manifest_opt = crate::manifest::parse_manifest(&data).ok();
+
+                            if let Some(manifest_path) = manifest_path_opt {
+                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Reading manifest at {:?}", manifest_path), progress: 0.0, is_paused: false });
+                                if let Ok(data) = std::fs::read(&manifest_path) {
+                                    manifest_opt = crate::manifest::parse_manifest(&data).ok();
+                                }
+                            }
+
+                            if manifest_opt.is_none() {
+                                // Try to download manifest
+                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Manifest not found, fetching for {}", app_name), progress: 0.0, is_paused: false });
+                                if let Ok(assets) = client.get_game_assets("Windows") {
+                                    if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                        if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
+                                            if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
+                                                if let Ok(manifest_data) = client.download_manifest(url) {
+                                                    // Save manifest
+                                                    if let Some(mut p) = crate::auth::get_config_dir() {
+                                                        p.push("manifests");
+                                                        let _ = std::fs::create_dir_all(&p);
+                                                        let manifest_path = p.join(format!("{}.manifest", app_name));
+                                                        let _ = std::fs::write(&manifest_path, &manifest_data);
+                                                    }
+                                                    manifest_opt = crate::manifest::parse_manifest(&manifest_data).ok();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             let game_dir = std::path::Path::new(&game.install_path);
@@ -460,32 +487,10 @@ impl LegendaryApp {
                                 }
                                 let _ = tx.send(WorkerResponse::TaskFinished(format!("Verification of {} complete. {} verified, {} mismatches, {} missing.", app_name, verified, mismatches, missing)));
                             } else {
-                                // Fallback if manifest parsing failed
-                                let files = get_all_files(game_dir);
-                                let total = files.len();
-
-                                for (i, file_path) in files.iter().enumerate() {
-                                    if check_status() {
-                                        let _ = tx.send(WorkerResponse::TaskFinished("Verification cancelled".to_string()));
-                                        break;
-                                    }
-                                    if let Ok(hash) = hash_file(file_path) {
-                                        log::debug!("Hashed {}: {}", file_path.display(), hash);
-                                    }
-                                    let progress = 0.1 + (i as f32 / total as f32) * 0.9;
-                                    if i % 10 == 0 {
-                                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Hashing files for {}", app_name), progress, is_paused: pause.load(Ordering::SeqCst) });
-                                    }
-                                }
-                                let _ = tx.send(WorkerResponse::TaskFinished(format!("Verification of {} complete. {} files checked (no manifest comparison).", app_name, total)));
+                                let _ = tx.send(WorkerResponse::Error(format!("Manifest for {} not found and could not be downloaded", app_name)));
                             }
                         } else {
-                            let msg = if game.is_none() {
-                                format!("Game {} not found in installed games", app_name)
-                            } else {
-                                format!("Manifest for {} not found", app_name)
-                            };
-                            let _ = tx.send(WorkerResponse::Error(msg));
+                            let _ = tx.send(WorkerResponse::Error(format!("Game {} not found in installed games", app_name)));
                         }
                         ctx_clone.request_repaint();
                     }
@@ -679,78 +684,46 @@ impl LegendaryApp {
                         }
 
                         // Try to get manifest URL
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Fetching manifest for {}", app_name), progress: 0.1, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Fetching manifest for {}", app_name), progress: 0.05, is_paused: false });
 
-                        let mut manifest_opt = None;
+                        let mut manifest_data_opt = None;
+                        let mut base_url_opt = None;
+
                         if let Ok(assets) = client.get_game_assets("Windows") {
                             if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                 if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                     if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
-                                        if let Ok(manifest_data) = client.download_manifest(url) {
+                                        if let Ok(data) = client.download_manifest(url) {
                                             // Save manifest
                                             if let Some(mut p) = crate::auth::get_config_dir() {
                                                 p.push("manifests");
                                                 let _ = std::fs::create_dir_all(&p);
                                                 let manifest_path = p.join(format!("{}.manifest", app_name));
-                                                let _ = std::fs::write(&manifest_path, &manifest_data);
+                                                let _ = std::fs::write(&manifest_path, &data);
                                             }
-                                            manifest_opt = crate::manifest::parse_manifest(&manifest_data).ok();
+                                            manifest_data_opt = Some(data);
+                                            base_url_opt = Some(url.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| url.to_string()));
                                         }
                                     }
                                 }
                             }
                         }
 
-                        let mut success = true;
-                        if let Some(manifest) = manifest_opt {
-                            let total_files = manifest.files.len();
-                            for (i, (filename, _info)) in manifest.files.iter().enumerate() {
-                                if check_status() {
-                                    let _ = tx.send(WorkerResponse::TaskFinished(format!("Installation of {} cancelled", app_name)));
-                                    let _ = std::fs::remove_dir_all(&install_path);
-                                    success = false;
-                                    break;
+                        let mut success = false;
+                        if let (Some(manifest_data), Some(base_url)) = (manifest_data_opt, base_url_opt) {
+                            if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
+                                let downloader = crate::download::Downloader::new(base_url, tx.clone(), cancel.clone(), pause.clone());
+                                match downloader.download_game(&manifest, &install_path) {
+                                    Ok(_) => success = true,
+                                    Err(e) => {
+                                        let _ = tx.send(WorkerResponse::Error(format!("Download failed: {}", e)));
+                                    }
                                 }
-
-                                // Create directory for file
-                                let file_path = install_path.join(filename);
-                                if let Some(parent) = file_path.parent() {
-                                    let _ = std::fs::create_dir_all(parent);
-                                }
-
-                                // Simulate chunk download by writing a small file
-                                if let Err(e) = std::fs::write(&file_path, "Simulated content".as_bytes()) {
-                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to write file {}: {}", filename, e)));
-                                    success = false;
-                                    break;
-                                }
-
-                                if i % 10 == 0 {
-                                    let progress = 0.2 + (i as f32 / total_files as f32) * 0.8;
-                                    let _ = tx.send(WorkerResponse::TaskProgress {
-                                        task_name: format!("Installing: {}", filename),
-                                        progress,
-                                        is_paused: pause.load(Ordering::SeqCst)
-                                    });
-                                }
+                            } else {
+                                let _ = tx.send(WorkerResponse::Error("Failed to parse manifest".to_string()));
                             }
                         } else {
-                            // Fallback to simulated work if manifest fails
-                            let total_steps = 100;
-                            for i in 1..=total_steps {
-                                if check_status() {
-                                    let _ = tx.send(WorkerResponse::TaskFinished(format!("Installation of {} cancelled", app_name)));
-                                    let _ = std::fs::remove_dir_all(&install_path);
-                                    success = false;
-                                    break;
-                                }
-                                std::thread::sleep(std::time::Duration::from_millis(50));
-                                let _ = tx.send(WorkerResponse::TaskProgress {
-                                    task_name: format!("Downloading and installing {}", app_name),
-                                    progress: i as f32 / total_steps as f32,
-                                    is_paused: pause.load(Ordering::SeqCst)
-                                });
-                            }
+                            let _ = tx.send(WorkerResponse::Error("Failed to fetch manifest".to_string()));
                         }
 
                         if success {
@@ -878,6 +851,7 @@ impl eframe::App for LegendaryApp {
                 }
                 WorkerResponse::Error(e) => {
                     self.status_message = format!("Error: {}", e);
+                    self.current_task = None;
                 }
                 WorkerResponse::TaskProgress { task_name, progress, is_paused } => {
                     self.current_task = Some(TaskStatus {

@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod models;
 mod manifest;
+mod download;
 #[cfg(test)]
 mod tests;
 
