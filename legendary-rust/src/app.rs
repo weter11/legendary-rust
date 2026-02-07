@@ -41,6 +41,7 @@ pub struct LegendaryApp {
     selected_tags: HashSet<String>,
     current_task: Option<TaskStatus>,
     manifest_files: Vec<String>,
+    manifest_search_query: String,
 }
 
 #[derive(Clone)]
@@ -173,6 +174,8 @@ enum View {
     SaveSync,
     InstallDialog,
     Tasks,
+    Account,
+    EosOverlay,
 }
 
 fn color_to_grayscale(pixels: &mut [egui::Color32]) {
@@ -184,7 +187,6 @@ fn color_to_grayscale(pixels: &mut [egui::Color32]) {
 
 
 use sha2::{Sha256, Digest};
-use sha1::Sha1;
 
 fn get_latest_local_save_time(path: &std::path::Path) -> Option<DateTime<Utc>> {
     let mut latest: Option<DateTime<Utc>> = None;
@@ -210,12 +212,6 @@ fn get_latest_local_save_time(path: &std::path::Path) -> Option<DateTime<Utc>> {
     latest
 }
 
-fn hash_file(path: &std::path::Path) -> Result<String, std::io::Error> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha1::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
-}
 
 fn get_all_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
@@ -232,18 +228,6 @@ fn get_all_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
-fn format_duration(dur: chrono::Duration) -> String {
-    let secs = dur.num_seconds().abs();
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else if secs < 86400 {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-    } else {
-        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
-    }
-}
 
 fn construct_manifest_url(manifest_node: &serde_json::Value) -> Option<String> {
     let uri = manifest_node["uri"].as_str()?;
@@ -534,7 +518,7 @@ impl LegendaryApp {
 
                                     let file_path = game_dir.join(filename);
                                     if file_path.exists() {
-                                        if let Ok(actual_hash) = hash_file(&file_path) {
+                                        if let Ok(actual_hash) = crate::utils::hash_file(&file_path) {
                                             let expected_hash = hex::encode(&info.hash);
                                             if actual_hash == expected_hash {
                                                 verified += 1;
@@ -1178,6 +1162,7 @@ impl LegendaryApp {
             selected_tags: HashSet::new(),
             current_task: None,
             manifest_files: Vec::new(),
+            manifest_search_query: String::new(),
         }
     }
 }
@@ -1270,7 +1255,7 @@ impl eframe::App for LegendaryApp {
                     self.installed_games = games;
                 }
                 WorkerResponse::GameTokenFetched { app_name, token } => {
-                    let _ = self.tx.send(WorkerMsg::LaunchGame { app_name, token });
+                    self.launch_game_with_token(app_name, token);
                 }
                 WorkerResponse::FilesListed(files) => {
                     self.manifest_files = files;
@@ -1296,21 +1281,20 @@ impl eframe::App for LegendaryApp {
             if ui.selectable_label(self.current_view == View::Settings, "Settings").clicked() {
                 self.current_view = View::Settings;
             }
-            if ui.selectable_label(self.current_view == View::Tasks, "Tasks").clicked() {
+            if ui.selectable_label(self.current_view == View::Tasks, "Download Queue").clicked() {
                 self.current_view = View::Tasks;
+            }
+            if ui.selectable_label(self.current_view == View::EosOverlay, "EOS Overlay").clicked() {
+                self.current_view = View::EosOverlay;
+            }
+            if self.token.is_some() {
+                if ui.selectable_label(self.current_view == View::Account, "Account").clicked() {
+                    self.current_view = View::Account;
+                }
             }
             ui.add_space(10.0);
             if self.token.is_none() {
                 if ui.button("Login").clicked() {
-                    self.current_view = View::Auth;
-                }
-            } else {
-                if ui.button("Logout").clicked() {
-                    let _ = self.tx.send(WorkerMsg::Logout);
-                    self.token = None;
-                    self.library.clear();
-                    self.images.clear();
-                    self.status_message = "Logged out".to_string();
                     self.current_view = View::Auth;
                 }
             }
@@ -1328,6 +1312,8 @@ impl eframe::App for LegendaryApp {
                 View::SaveSync => self.show_save_sync_view(ui),
                 View::InstallDialog => self.show_install_dialog_view(ui),
                 View::Tasks => self.show_tasks_view(ui),
+                View::Account => self.show_account_view(ui),
+                View::EosOverlay => self.show_eos_overlay_view(ui),
             }
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -1346,13 +1332,17 @@ impl eframe::App for LegendaryApp {
 }
 
 impl LegendaryApp {
+    fn launch_game_with_token(&mut self, app_name: String, token: String) {
+        let _ = self.tx.send(WorkerMsg::LaunchGame { app_name, token });
+    }
+
     fn show_tasks_view(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Tasks");
+        ui.heading("Download Queue");
         ui.separator();
 
         if let Some(task) = self.current_task.clone() {
             ui.group(|ui| {
-                ui.label(format!("Active Task: {}", task.name));
+                ui.label(format!("Current Task: {}", task.name));
                 ui.add(egui::ProgressBar::new(task.progress).show_percentage());
                 ui.horizontal(|ui| {
                     if !task.speed.is_empty() {
@@ -1476,13 +1466,16 @@ impl LegendaryApp {
             ui.vertical(|ui| {
                 for item in &self.library {
                     let local_meta = crate::auth::load_local_metadata(&item.app_name);
-                    let title = local_meta.as_ref()
-                        .map(|m| m.app_title.clone())
-                        .or_else(|| item.metadata.as_ref()
-                            .and_then(|m| m.get("title"))
-                            .and_then(|t| t.as_str())
-                            .map(|s| s.to_string()))
-                        .unwrap_or_else(|| item.app_name.clone());
+                    let alias = self.config.games.get(&item.app_name).and_then(|s| s.alias.clone());
+                    let title = alias.unwrap_or_else(|| {
+                        local_meta.as_ref()
+                            .map(|m| m.app_title.clone())
+                            .or_else(|| item.metadata.as_ref()
+                                .and_then(|m| m.get("title"))
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string()))
+                            .unwrap_or_else(|| item.app_name.clone())
+                    });
 
                     if !self.search_query.is_empty() && !title.to_lowercase().contains(&self.search_query.to_lowercase()) && !item.app_name.to_lowercase().contains(&self.search_query.to_lowercase()) {
                         continue;
@@ -1518,6 +1511,13 @@ impl LegendaryApp {
                                 ui.horizontal(|ui| {
                                     if is_installed {
                                         ui.label("✅");
+                                        if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == item.app_name) {
+                                            if let Some(asset) = self.assets.iter().find(|a| a.app_name == item.app_name) {
+                                                if asset.build_version != installed.version {
+                                                    ui.colored_label(egui::Color32::YELLOW, "⏫ Update Available");
+                                                }
+                                            }
+                                        }
                                     }
                                     if ui.button(egui::RichText::new(title).strong().size(18.0)).clicked() {
                                         self.selected_app_name = Some(item.app_name.clone());
@@ -1783,6 +1783,13 @@ impl LegendaryApp {
                     let mut changed = false;
                     let game_settings = self.config.games.entry(app_name.clone()).or_default();
 
+                    ui.label("Alias:");
+                    let mut alias_str = game_settings.alias.clone().unwrap_or_default();
+                    if ui.text_edit_singleline(&mut alias_str).changed() {
+                        game_settings.alias = if alias_str.is_empty() { None } else { Some(alias_str) };
+                        changed = true;
+                    }
+
                     ui.label("Additional Parameters:");
                     if ui.text_edit_singleline(&mut game_settings.start_params).changed() {
                         changed = true;
@@ -1841,19 +1848,30 @@ impl LegendaryApp {
 
                 ui.add_space(10.0);
                 ui.collapsing("Manifest Files", |ui| {
-                    if ui.button("Fetch/Refresh File List").clicked() {
-                        let catalog_item_id = self.library.iter().find(|i| i.app_name == app_name)
-                            .map(|i| i.catalog_item_id.clone())
-                            .unwrap_or_default();
-                        let _ = self.tx.send(WorkerMsg::ListFiles {
-                            app_name: app_name.clone(),
-                            catalog_item_id,
-                        });
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Fetch/Refresh").clicked() {
+                            let catalog_item_id = self.library.iter().find(|i| i.app_name == app_name)
+                                .map(|i| i.catalog_item_id.clone())
+                                .unwrap_or_default();
+                            let _ = self.tx.send(WorkerMsg::ListFiles {
+                                app_name: app_name.clone(),
+                                catalog_item_id,
+                            });
+                        }
+                        ui.label("Search:");
+                        ui.text_edit_singleline(&mut self.manifest_search_query);
+                        if ui.button("×").clicked() {
+                            self.manifest_search_query.clear();
+                        }
+                    });
+
                     if !self.manifest_files.is_empty() {
-                        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                        let query = self.manifest_search_query.to_lowercase();
+                        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
                             for file in &self.manifest_files {
-                                ui.label(file);
+                                if query.is_empty() || file.to_lowercase().contains(&query) {
+                                    ui.label(file);
+                                }
                             }
                         });
                     }
@@ -1963,7 +1981,6 @@ impl LegendaryApp {
 
     fn show_install_dialog_view(&mut self, ui: &mut egui::Ui) {
         if let Some(info) = &self.install_info {
-            let app_name = info.app_name.clone();
             ui.heading(format!("Install {}", info.title));
             ui.add_space(10.0);
 
@@ -2162,9 +2179,9 @@ impl LegendaryApp {
                 if diff < 2 {
                     ui.colored_label(egui::Color32::GREEN, "✔ Both saves are synchronized.");
                 } else if l > r {
-                    ui.colored_label(egui::Color32::YELLOW, format!("⚠ Local save is newer (by {}).", format_duration(l - r)));
+                    ui.colored_label(egui::Color32::YELLOW, format!("⚠ Local save is newer (by {}).", crate::utils::format_duration(l - r)));
                 } else {
-                    ui.colored_label(egui::Color32::YELLOW, format!("⚠ Cloud save is newer (by {}).", format_duration(r - l)));
+                    ui.colored_label(egui::Color32::YELLOW, format!("⚠ Cloud save is newer (by {}).", crate::utils::format_duration(r - l)));
                 }
             }
 
@@ -2261,6 +2278,79 @@ impl LegendaryApp {
                 });
             });
         }
+    }
+
+    fn show_account_view(&mut self, ui: &mut egui::Ui) {
+        ui.heading("User Account Overview");
+        ui.separator();
+
+        if let Some(token) = &self.token {
+            egui::Grid::new("account_grid")
+                .num_columns(2)
+                .spacing([40.0, 10.0])
+                .show(ui, |ui| {
+                    ui.label("Display Name:");
+                    ui.label(token.display_name.as_deref().unwrap_or("Unknown"));
+                    ui.end_row();
+
+                    ui.label("Account ID:");
+                    ui.label(&token.account_id);
+                    ui.end_row();
+
+                    ui.label("Client ID:");
+                    ui.label(&token.client_id);
+                    ui.end_row();
+
+                    ui.label("Token Type:");
+                    ui.label(&token.token_type);
+                    ui.end_row();
+
+                    ui.label("Expires At:");
+                    ui.label(&token.expires_at);
+                    ui.end_row();
+                });
+
+            ui.add_space(20.0);
+            if ui.button("Logout").clicked() {
+                let _ = self.tx.send(WorkerMsg::Logout);
+                self.token = None;
+                self.library.clear();
+                self.images.clear();
+                self.status_message = "Logged out".to_string();
+                self.current_view = View::Auth;
+            }
+        } else {
+            ui.label("Not logged in.");
+            if ui.button("Go to Login").clicked() {
+                self.current_view = View::Auth;
+            }
+        }
+    }
+
+    fn show_eos_overlay_view(&mut self, ui: &mut egui::Ui) {
+        ui.heading("EOS Overlay Manager");
+        ui.separator();
+
+        ui.group(|ui| {
+            ui.label("Global EOS Overlay Setting:");
+            if ui.checkbox(&mut self.config.global.eos_overlay_enabled, "Enable EOS Overlay by default").changed() {
+                let _ = self.config.save();
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.heading("Per-game EOS Overlay Settings");
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for game in &self.installed_games {
+                ui.horizontal(|ui| {
+                    ui.label(&game.title);
+                    let settings = self.config.games.entry(game.app_name.clone()).or_default();
+                    if ui.checkbox(&mut settings.eos_overlay_enabled, "Enabled").changed() {
+                        let _ = self.config.save();
+                    }
+                });
+            }
+        });
     }
 
     fn show_settings_view(&mut self, ui: &mut egui::Ui) {

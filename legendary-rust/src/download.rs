@@ -3,7 +3,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
 use anyhow::Result;
 use crate::manifest::Manifest;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 use std::sync::mpsc::{Sender, channel};
@@ -43,16 +43,39 @@ impl Downloader {
     }
 
     pub fn download_game(&self, manifest: &Manifest, install_path: &Path, selected_tags: Option<std::collections::HashSet<String>>) -> Result<()> {
-        let chunk_to_files: Arc<std::collections::HashMap<[u32; 4], Vec<String>>> = Arc::new({
-            let mut map: std::collections::HashMap<[u32; 4], Vec<String>> = std::collections::HashMap::new();
-            for (filename, file_manifest) in &manifest.files {
-                if let Some(tags) = &selected_tags {
-                    if !file_manifest.install_tags.is_empty() && !file_manifest.install_tags.iter().any(|t| tags.contains(t)) {
+        let mut files_to_download = std::collections::HashSet::new();
+        for (filename, file_manifest) in &manifest.files {
+            if let Some(tags) = &selected_tags {
+                if !file_manifest.install_tags.is_empty() && !file_manifest.install_tags.iter().any(|t| tags.contains(t)) {
+                    continue;
+                }
+            }
+
+            let target_file_path = install_path.join(filename);
+            if target_file_path.exists() {
+                // Delta patching: skip files that already match the hash
+                if let Ok(actual_hash) = crate::utils::hash_file(&target_file_path) {
+                    if actual_hash == hex::encode(&file_manifest.hash) {
+                        log::info!("Skipping {}, hash matches", filename);
                         continue;
                     }
                 }
-                for part in &file_manifest.chunk_parts {
-                    map.entry(part.guid).or_default().push(filename.clone());
+            }
+            files_to_download.insert(filename.clone());
+        }
+
+        if files_to_download.is_empty() {
+            log::info!("All files are up to date.");
+            return Ok(());
+        }
+
+        let chunk_to_files: Arc<std::collections::HashMap<[u32; 4], Vec<String>>> = Arc::new({
+            let mut map: std::collections::HashMap<[u32; 4], Vec<String>> = std::collections::HashMap::new();
+            for filename in &files_to_download {
+                if let Some(file_manifest) = manifest.files.get(filename) {
+                    for part in &file_manifest.chunk_parts {
+                        map.entry(part.guid).or_default().push(filename.clone());
+                    }
                 }
             }
             map

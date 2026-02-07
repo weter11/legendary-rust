@@ -52,6 +52,8 @@ pub struct GameSettings {
     #[serde(default = "default_true")]
     pub cloud_sync_enabled: bool,
     #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
     pub use_custom_pfx: bool,
     #[serde(default)]
     pub custom_pfx_path: Option<PathBuf>,
@@ -78,6 +80,7 @@ impl Default for GameSettings {
             play_offline: false,
             custom_exe_path: None,
             cloud_sync_enabled: true,
+            alias: None,
             use_custom_pfx: false,
             custom_pfx_path: None,
             pre_launch_command: String::new(),

@@ -26,7 +26,7 @@ impl EgsClient {
             client,
             user_basic,
             pw_basic,
-            access_token: None,
+            token_info: None,
         })
     }
 
