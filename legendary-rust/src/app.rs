@@ -1019,7 +1019,8 @@ impl LegendaryApp {
 
                                     let mut cmd = if use_umu && std::env::consts::OS == "linux" {
                                         let mut c = std::process::Command::new("/usr/bin/umu-run");
-                                        c.env("STORE", "egs");
+                                        let store = game_settings.and_then(|s| s.umu_store.clone()).unwrap_or_else(|| config.global.umu_store.clone());
+                                        c.env("STORE", store);
                                         c.env("GAMEID", "umu-default");
 
                                         let pfx_path = if let Some(gs) = game_settings {
@@ -1858,6 +1859,17 @@ impl LegendaryApp {
                         changed = true;
                     }
 
+                    if game_settings.use_umu {
+                        ui.horizontal(|ui| {
+                            ui.label("UMU Store:");
+                            let mut store_str = game_settings.umu_store.clone().unwrap_or_default();
+                            if ui.text_edit_singleline(&mut store_str).changed() {
+                                game_settings.umu_store = if store_str.is_empty() { None } else { Some(store_str) };
+                                changed = true;
+                            }
+                        });
+                    }
+
                     if changed {
                         let _ = self.config.save();
                     }
@@ -2412,6 +2424,15 @@ impl LegendaryApp {
             ui.add_space(10.0);
             if ui.checkbox(&mut self.config.global.use_umu, "Use UMU Launcher by default").changed() {
                 changed = true;
+            }
+
+            if self.config.global.use_umu {
+                ui.horizontal(|ui| {
+                    ui.label("Default UMU Store:");
+                    if ui.text_edit_singleline(&mut self.config.global.umu_store).changed() {
+                        changed = true;
+                    }
+                });
             }
 
             if changed {

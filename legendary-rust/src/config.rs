@@ -22,6 +22,12 @@ pub struct GlobalSettings {
     pub eos_overlay_enabled: bool,
     #[serde(default)]
     pub use_umu: bool,
+    #[serde(default = "default_store")]
+    pub umu_store: String,
+}
+
+fn default_store() -> String {
+    "egs".to_string()
 }
 
 impl Default for GlobalSettings {
@@ -33,6 +39,7 @@ impl Default for GlobalSettings {
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
             use_umu: false,
+            umu_store: default_store(),
         }
     }
 }
@@ -61,6 +68,8 @@ pub struct GameSettings {
     pub eos_overlay_enabled: bool,
     #[serde(default)]
     pub use_umu: bool,
+    #[serde(default)]
+    pub umu_store: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -83,6 +92,7 @@ impl Default for GameSettings {
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
             use_umu: false,
+            umu_store: None,
         }
     }
 }
