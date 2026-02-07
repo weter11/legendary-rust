@@ -1147,6 +1147,19 @@ impl LegendaryApp {
                                         cmd.env("EOS_OVERLAY_KILLED", "1");
                                     }
 
+                                    // Log launch info to terminal
+                                    println!("--- Launch Info ---");
+                                    let vars = ["GAMEID", "STORE", "STEAM_COMPAT_INSTALL_PATH", "LD_PRELOAD", "STEAM_COMPAT_CLIENT_INSTALL_PATH", "WINEPREFIX", "STEAM_COMPAT_DATA_PATH", "PROTONPATH"];
+                                    for var in vars {
+                                        let val = cmd.get_envs().find(|(k, _)| k.to_str() == Some(var))
+                                            .and_then(|(_, v)| v)
+                                            .map(|v| v.to_string_lossy().into_owned())
+                                            .or_else(|| std::env::var(var).ok())
+                                            .unwrap_or_default();
+                                        println!("{}: {}", var, val);
+                                    }
+                                    println!("-------------------");
+
                                     if let Some(settings) = game_settings {
                                         if settings.play_offline {
                                             cmd.arg("-offline");
