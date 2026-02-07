@@ -256,6 +256,7 @@ fn get_cache_path(url: &str) -> Option<std::path::PathBuf> {
 
     let mut hasher = Sha256::new();
     hasher.update(url.as_bytes());
+    hasher.update(b"v2"); // Force recreation for resized images
     let result = hasher.finalize();
     let filename = format!("{:x}.img", result);
 
@@ -375,10 +376,25 @@ impl LegendaryApp {
                         if image_bytes.is_none() {
                             if let Ok(res) = reqwest::blocking::get(&url) {
                                 if let Ok(bytes) = res.bytes() {
-                                    if let Some(ref path) = cache_path {
-                                        let _ = std::fs::write(path, &bytes);
+                                    // Resize by 2x before caching
+                                    if let Ok(img) = image::load_from_memory(&bytes) {
+                                        let resized = img.resize(img.width() / 2, img.height() / 2, image::imageops::FilterType::Triangle);
+                                        let mut buf = std::io::Cursor::new(Vec::new());
+                                        if resized.write_to(&mut buf, image::ImageFormat::Png).is_ok() {
+                                            let resized_bytes = buf.into_inner();
+                                            if let Some(ref path) = cache_path {
+                                                let _ = std::fs::write(path, &resized_bytes);
+                                            }
+                                            image_bytes = Some(resized_bytes);
+                                        }
                                     }
-                                    image_bytes = Some(bytes.to_vec());
+
+                                    if image_bytes.is_none() {
+                                        if let Some(ref path) = cache_path {
+                                            let _ = std::fs::write(path, &bytes);
+                                        }
+                                        image_bytes = Some(bytes.to_vec());
+                                    }
                                 }
                             }
                         }
@@ -1004,7 +1020,7 @@ impl LegendaryApp {
                                     let mut cmd = if use_umu && std::env::consts::OS == "linux" {
                                         let mut c = std::process::Command::new("/usr/bin/umu-run");
                                         c.env("STORE", "egs");
-                                        c.env("GAMEID", format!("umu-{}", app_name));
+                                        c.env("GAMEID", "umu-default");
 
                                         let pfx_path = if let Some(gs) = game_settings {
                                             if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
