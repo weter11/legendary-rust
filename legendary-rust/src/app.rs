@@ -14,6 +14,9 @@ use chrono::{DateTime, Utc};
 
 use crate::config::{AppConfig, CompatibilityTool};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 pub struct LegendaryApp {
     token: Option<OAuthToken>,
     library: Vec<LibraryItem>,
@@ -25,13 +28,25 @@ pub struct LegendaryApp {
     fetching_images: HashSet<(String, String)>,
     config: AppConfig,
     auth_code: String,
+    search_query: String,
     status_message: String,
     current_view: View,
     tx: Sender<WorkerMsg>,
     rx: Receiver<WorkerResponse>,
+    worker_cancel: Arc<AtomicBool>,
+    worker_pause: Arc<AtomicBool>,
     running_processes: HashMap<String, std::process::Child>,
     save_sync_status: Option<SaveSyncStatus>,
     install_info: Option<crate::models::InstallInfo>,
+    selected_tags: HashSet<String>,
+    current_task: Option<TaskStatus>,
+}
+
+#[derive(Clone)]
+pub struct TaskStatus {
+    pub name: String,
+    pub progress: f32,
+    pub is_paused: bool,
 }
 
 #[derive(Clone)]
@@ -44,7 +59,7 @@ pub struct SaveSyncStatus {
     pub error: Option<String>,
 }
 
-enum WorkerMsg {
+pub(crate) enum WorkerMsg {
     Login(String),
     RefreshLibrary,
     FetchGameInfo(String, String), // namespace, catalog_item_id
@@ -56,6 +71,9 @@ enum WorkerMsg {
         image_type: String,
     },
     Logout,
+    CancelTask,
+    PauseTask,
+    ResumeTask,
     VerifyGame {
         app_name: String,
         catalog_item_id: String,
@@ -83,16 +101,18 @@ enum WorkerMsg {
     InstallGame {
         app_name: String,
         install_path: std::path::PathBuf,
+        selected_tags: Option<HashSet<String>>,
     },
     UninstallGame(String),
     ScanGames {
         library: Vec<LibraryItem>,
         search_paths: Vec<std::path::PathBuf>,
     },
+    EglSync,
     FetchGameToken(String),
 }
 
-enum WorkerResponse {
+pub(crate) enum WorkerResponse {
     LoggedIn(OAuthToken),
     LibraryFetched(Vec<LibraryItem>),
     GameInfoFetched(GameInfo),
@@ -103,7 +123,11 @@ enum WorkerResponse {
         image: egui::ColorImage,
     },
     Error(String),
-    TaskProgress(String, f32), // task_name, progress
+    TaskProgress {
+        task_name: String,
+        progress: f32,
+        is_paused: bool,
+    },
     TaskFinished(String),
     SaveSyncStatusFetched {
         app_name: String,
@@ -128,6 +152,7 @@ enum View {
     Settings,
     SaveSync,
     InstallDialog,
+    Tasks,
 }
 
 fn color_to_grayscale(pixels: &mut [egui::Color32]) {
@@ -226,10 +251,26 @@ impl LegendaryApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (tx, rx) = channel();
         let (worker_tx, worker_rx) = channel();
+        let worker_cancel = Arc::new(AtomicBool::new(false));
+        let worker_pause = Arc::new(AtomicBool::new(false));
+
+        let worker_cancel_clone = worker_cancel.clone();
+        let worker_pause_clone = worker_pause.clone();
 
         let ctx_clone = cc.egui_ctx.clone();
         // Spawn worker thread
         std::thread::spawn(move || {
+            let cancel = worker_cancel_clone;
+            let pause = worker_pause_clone;
+
+            let check_status = || {
+                while pause.load(Ordering::SeqCst) {
+                    if cancel.load(Ordering::SeqCst) { return true; }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                cancel.load(Ordering::SeqCst)
+            };
+
             let mut client = match EgsClient::new() {
                 Ok(c) => c,
                 Err(e) => {
@@ -263,7 +304,18 @@ impl LegendaryApp {
             }
 
             while let Ok(msg) = worker_rx.recv() {
+                cancel.store(false, Ordering::SeqCst);
+                pause.store(false, Ordering::SeqCst);
                 match msg {
+                    WorkerMsg::CancelTask => {
+                        continue;
+                    }
+                    WorkerMsg::PauseTask => {
+                        continue;
+                    }
+                    WorkerMsg::ResumeTask => {
+                        continue;
+                    }
                     WorkerMsg::Login(code) => {
                         let _ = tx.send(WorkerResponse::Error("Logging in...".to_string()));
                         match client.start_session(&code) {
@@ -358,51 +410,112 @@ impl LegendaryApp {
                         // Clear client token too if needed
                     }
                     WorkerMsg::VerifyGame { app_name, catalog_item_id } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Verifying {}", app_name), 0.0));
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Verifying {}", app_name), progress: 0.0, is_paused: false });
                         let installed = crate::auth::load_installed_games();
                         let game = installed.iter().find(|g| g.app_name == app_name);
 
-                        if let (Some(game), Some(manifest_path)) = (game, crate::auth::get_manifest_path(&app_name, &catalog_item_id)) {
-                            let _ = tx.send(WorkerResponse::TaskProgress(format!("Reading manifest at {:?}", manifest_path), 0.1));
+                        let manifest_path_opt = crate::auth::get_manifest_path(&app_name, &catalog_item_id);
 
-                            let game_dir = std::path::Path::new(&game.install_path);
-                            let files = get_all_files(game_dir);
-                            let total = files.len();
+                        if let Some(game) = game {
+                            let mut manifest_opt = None;
 
-                            for (i, file_path) in files.iter().enumerate() {
-                                if let Ok(hash) = hash_file(file_path) {
-                                    log::debug!("Hashed {}: {}", file_path.display(), hash);
-                                }
-                                let progress = 0.1 + (i as f32 / total as f32) * 0.9;
-                                if i % 10 == 0 {
-                                    let _ = tx.send(WorkerResponse::TaskProgress(format!("Hashing files for {}", app_name), progress));
+                            if let Some(manifest_path) = manifest_path_opt {
+                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Reading manifest at {:?}", manifest_path), progress: 0.0, is_paused: false });
+                                if let Ok(data) = std::fs::read(&manifest_path) {
+                                    manifest_opt = crate::manifest::parse_manifest(&data).ok();
                                 }
                             }
 
-                            let _ = tx.send(WorkerResponse::TaskFinished(format!("Verification of {} complete. {} files checked.", app_name, total)));
-                        } else {
-                            let msg = if game.is_none() {
-                                format!("Game {} not found in installed games", app_name)
+                            if manifest_opt.is_none() {
+                                // Try to download manifest
+                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Manifest not found, fetching for {}", app_name), progress: 0.0, is_paused: false });
+                                if let Ok(assets) = client.get_game_assets("Windows") {
+                                    if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                        if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
+                                            if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
+                                                if let Ok(manifest_data) = client.download_manifest(url) {
+                                                    // Save manifest
+                                                    if let Some(mut p) = crate::auth::get_config_dir() {
+                                                        p.push("manifests");
+                                                        let _ = std::fs::create_dir_all(&p);
+                                                        let manifest_path = p.join(format!("{}.manifest", app_name));
+                                                        let _ = std::fs::write(&manifest_path, &manifest_data);
+                                                    }
+                                                    manifest_opt = crate::manifest::parse_manifest(&manifest_data).ok();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            let game_dir = std::path::Path::new(&game.install_path);
+
+                            if let Some(manifest) = manifest_opt {
+                                let total_files = manifest.files.len();
+                                let mut verified = 0;
+                                let mut mismatches = 0;
+                                let mut missing = 0;
+
+                                for (i, (filename, info)) in manifest.files.iter().enumerate() {
+                                    if check_status() {
+                                        let _ = tx.send(WorkerResponse::TaskFinished("Verification cancelled".to_string()));
+                                        break;
+                                    }
+
+                                    let file_path = game_dir.join(filename);
+                                    if file_path.exists() {
+                                        if let Ok(actual_hash) = hash_file(&file_path) {
+                                            let expected_hash = hex::encode(&info.hash);
+                                            if actual_hash == expected_hash {
+                                                verified += 1;
+                                            } else {
+                                                mismatches += 1;
+                                                log::warn!("Hash mismatch for {}: expected {}, got {}", filename, expected_hash, actual_hash);
+                                            }
+                                        } else {
+                                            mismatches += 1;
+                                        }
+                                    } else {
+                                        missing += 1;
+                                        log::warn!("File missing: {}", filename);
+                                    }
+
+                                    if i % 10 == 0 {
+                                        let progress = i as f32 / total_files as f32;
+                                        let _ = tx.send(WorkerResponse::TaskProgress {
+                                            task_name: format!("Verifying: {}", filename),
+                                            progress,
+                                            is_paused: pause.load(Ordering::SeqCst)
+                                        });
+                                    }
+                                }
+                                let _ = tx.send(WorkerResponse::TaskFinished(format!("Verification of {} complete. {} verified, {} mismatches, {} missing.", app_name, verified, mismatches, missing)));
                             } else {
-                                format!("Manifest for {} not found", app_name)
-                            };
-                            let _ = tx.send(WorkerResponse::Error(msg));
+                                let _ = tx.send(WorkerResponse::Error(format!("Manifest for {} not found and could not be downloaded", app_name)));
+                            }
+                        } else {
+                            let _ = tx.send(WorkerResponse::Error(format!("Game {} not found in installed games", app_name)));
                         }
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::RepairGame(app_name, update) => {
                         let task_name = if update { format!("Repairing and Updating {}", app_name) } else { format!("Repairing {}", app_name) };
-                        let _ = tx.send(WorkerResponse::TaskProgress(task_name.clone(), 0.0));
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: task_name.clone(), progress: 0.0, is_paused: false });
                         // Placeholder for repair logic
                         for i in 1..=10 {
+                            if check_status() {
+                                let _ = tx.send(WorkerResponse::TaskFinished(format!("Task '{}' cancelled", task_name)));
+                                break;
+                            }
                             std::thread::sleep(std::time::Duration::from_millis(300));
-                            let _ = tx.send(WorkerResponse::TaskProgress(task_name.clone(), i as f32 / 10.0));
+                            let _ = tx.send(WorkerResponse::TaskProgress { task_name: task_name.clone(), progress: i as f32 / 10.0, is_paused: pause.load(Ordering::SeqCst) });
                         }
                         let _ = tx.send(WorkerResponse::TaskFinished(format!("Task '{}' complete", task_name)));
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::SyncCloudSaves { app_name, namespace, save_path } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Checking cloud saves for {}", app_name), 0.0));
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Checking cloud saves for {}", app_name), progress: 0.0, is_paused: false });
                         let local_time = save_path.as_ref().and_then(|p| get_latest_local_save_time(p));
 
                         if let Some(token) = crate::auth::load_token().ok() {
@@ -448,7 +561,7 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::UploadCloudSave { app_name, namespace, save_path } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Uploading saves for {}", app_name), 0.0));
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: 0.0, is_paused: false });
                         if let Ok(token) = crate::auth::load_token() {
                             let files = get_all_files(&save_path);
                             let total = files.len();
@@ -466,7 +579,7 @@ impl LegendaryApp {
                                         }
                                     }
                                 }
-                                let _ = tx.send(WorkerResponse::TaskProgress(format!("Uploading saves for {}", app_name), (i + 1) as f32 / total as f32));
+                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false });
                             }
                             if success {
                                 let _ = tx.send(WorkerResponse::TaskFinished(format!("Upload for {} complete. {} files uploaded.", app_name, total)));
@@ -477,7 +590,7 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::DownloadCloudSave { app_name, namespace, save_path } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Downloading saves for {}", app_name), 0.0));
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Downloading saves for {}", app_name), progress: 0.0, is_paused: false });
                         if let Ok(token) = crate::auth::load_token() {
                             match client.get_cloud_save_metadata(&namespace, &token.account_id, &app_name) {
                                 Ok(files) => {
@@ -502,7 +615,7 @@ impl LegendaryApp {
                                                 break;
                                             }
                                         }
-                                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Downloading saves for {}", app_name), (i + 1) as f32 / total as f32));
+                                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Downloading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false });
                                     }
                                     if success {
                                         let _ = tx.send(WorkerResponse::TaskFinished(format!("Download for {} complete. {} files downloaded.", app_name, total)));
@@ -518,7 +631,29 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::FetchInstallInfo { app_name, title } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Fetching install info for {}", app_name), 0.0));
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Fetching install info for {}", app_name), progress: 0.0, is_paused: false });
+
+                        let mut available_tags = Vec::new();
+                        if let Ok(assets) = client.get_game_assets("Windows") {
+                            if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
+                                    if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
+                                        if let Ok(manifest_data) = client.download_manifest(url) {
+                                            if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
+                                                let mut tags = HashSet::new();
+                                                for file in manifest.files.values() {
+                                                    for tag in &file.install_tags {
+                                                        tags.insert(tag.clone());
+                                                    }
+                                                }
+                                                available_tags = tags.into_iter().collect();
+                                                available_tags.sort();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         let local_meta = crate::auth::load_local_metadata(&app_name);
                         let mut install_size = 0;
@@ -562,41 +697,119 @@ impl LegendaryApp {
                             download_size,
                             install_size,
                             free_space: free,
+                            available_tags,
                         };
                         let _ = tx.send(WorkerResponse::InstallInfoFetched(info));
                         ctx_clone.request_repaint();
                     }
-                    WorkerMsg::InstallGame { app_name, install_path } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Installing {} to {:?}", app_name, install_path), 0.0));
-                        for i in 1..=10 {
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            let _ = tx.send(WorkerResponse::TaskProgress(format!("Downloading {}", app_name), i as f32 / 10.0));
-                        }
-                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Installation of {} complete", app_name)));
+                    WorkerMsg::InstallGame { app_name, install_path, selected_tags } => {
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Preparing installation for {}", app_name), progress: 0.0, is_paused: false });
 
-                        // Re-fetch installed games after installation
-                        let installed = crate::auth::load_installed_games();
-                        let _ = tx.send(WorkerResponse::GamesScanned(installed));
+                        // Actual implementation: Create directory
+                        if let Err(e) = std::fs::create_dir_all(&install_path) {
+                            let _ = tx.send(WorkerResponse::Error(format!("Failed to create directory: {}", e)));
+                            continue;
+                        }
+
+                        // Try to get manifest URL
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Fetching manifest for {}", app_name), progress: 0.05, is_paused: false });
+
+                        let mut manifest_data_opt = None;
+                        let mut base_url_opt = None;
+
+                        if let Ok(assets) = client.get_game_assets("Windows") {
+                            if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
+                                    if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
+                                        if let Ok(data) = client.download_manifest(url) {
+                                            // Save manifest
+                                            if let Some(mut p) = crate::auth::get_config_dir() {
+                                                p.push("manifests");
+                                                let _ = std::fs::create_dir_all(&p);
+                                                let manifest_path = p.join(format!("{}.manifest", app_name));
+                                                let _ = std::fs::write(&manifest_path, &data);
+                                            }
+                                            manifest_data_opt = Some(data);
+                                            base_url_opt = Some(url.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| url.to_string()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut success = false;
+                        if let (Some(manifest_data), Some(base_url)) = (manifest_data_opt, base_url_opt) {
+                            if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
+                                let downloader = crate::download::Downloader::new(base_url, tx.clone(), cancel.clone(), pause.clone());
+                                match downloader.download_game(&manifest, &install_path, selected_tags) {
+                                    Ok(_) => success = true,
+                                    Err(e) => {
+                                        let _ = tx.send(WorkerResponse::Error(format!("Download failed: {}", e)));
+                                    }
+                                }
+                            } else {
+                                let _ = tx.send(WorkerResponse::Error("Failed to parse manifest".to_string()));
+                            }
+                        } else {
+                            let _ = tx.send(WorkerResponse::Error("Failed to fetch manifest".to_string()));
+                        }
+
+                        if success {
+                            // Update installed.json
+                            let mut installed = crate::auth::load_installed_games();
+                            let title = crate::auth::load_local_metadata(&app_name)
+                                .map(|m| m.app_title)
+                                .unwrap_or_else(|| app_name.clone());
+
+                            installed.push(crate::models::InstalledGame {
+                                app_name: app_name.clone(),
+                                install_path: install_path.to_string_lossy().to_string(),
+                                title: title.clone(),
+                                version: "1.0.0".to_string(),
+                                install_size: 10 * 1024 * 1024, // 10MB simulated
+                                download_size: 5 * 1024 * 1024,
+                            });
+                            let _ = crate::auth::save_installed_games(&installed);
+
+                            let _ = tx.send(WorkerResponse::TaskFinished(format!("Installation of {} complete", app_name)));
+                            let _ = tx.send(WorkerResponse::GamesScanned(installed));
+                        }
 
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::UninstallGame(app_name) => {
-                        let _ = tx.send(WorkerResponse::TaskProgress(format!("Uninstalling {}", app_name), 0.0));
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uninstalling {}", app_name), progress: 0.0, is_paused: false });
 
                         let mut installed = crate::auth::load_installed_games();
+                        if let Some(game) = installed.iter().find(|g| g.app_name == app_name).cloned() {
+                            let path = std::path::Path::new(&game.install_path);
+                            if path.exists() {
+                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Deleting files for {}", app_name), progress: 0.5, is_paused: false });
+                                if let Err(e) = std::fs::remove_dir_all(path) {
+                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to delete game files: {}", e)));
+                                }
+                            }
+                        }
+
                         installed.retain(|g| g.app_name != app_name);
                         let _ = crate::auth::save_installed_games(&installed);
 
-                        std::thread::sleep(std::time::Duration::from_millis(500));
                         let _ = tx.send(WorkerResponse::GamesScanned(installed));
                         let _ = tx.send(WorkerResponse::TaskFinished(format!("Uninstalled {}", app_name)));
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::ScanGames { library, search_paths } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress("Scanning for games...".to_string(), 0.0));
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: "Scanning for games...".to_string(), progress: 0.0, is_paused: false });
                         let installed = crate::auth::scan_and_import_games(&library, &search_paths);
                         let _ = tx.send(WorkerResponse::GamesScanned(installed));
                         let _ = tx.send(WorkerResponse::TaskFinished("Scan complete".to_string()));
+                        ctx_clone.request_repaint();
+                    }
+                    WorkerMsg::EglSync => {
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: "Syncing with EGL...".to_string(), progress: 0.0, is_paused: false });
+                        let installed = crate::auth::scan_egl_manifests();
+                        let _ = tx.send(WorkerResponse::GamesScanned(installed));
+                        let _ = tx.send(WorkerResponse::TaskFinished("EGL Sync complete".to_string()));
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::FetchGameToken(app_name) => {
@@ -625,13 +838,18 @@ impl LegendaryApp {
             fetching_images: HashSet::new(),
             config: AppConfig::load(),
             auth_code: String::new(),
+            search_query: String::new(),
             status_message: "Welcome to Legendary Rust".to_string(),
             current_view: View::Auth,
             tx: worker_tx,
             rx,
+            worker_cancel,
+            worker_pause,
             running_processes: HashMap::new(),
             save_sync_status: None,
             install_info: None,
+            selected_tags: HashSet::new(),
+            current_task: None,
         }
     }
 }
@@ -670,12 +888,23 @@ impl eframe::App for LegendaryApp {
                 }
                 WorkerResponse::Error(e) => {
                     self.status_message = format!("Error: {}", e);
+                    self.current_task = None;
                 }
-                WorkerResponse::TaskProgress(task, progress) => {
-                    self.status_message = format!("{}: {:.0}%", task, progress * 100.0);
+                WorkerResponse::TaskProgress { task_name, progress, is_paused } => {
+                    self.current_task = Some(TaskStatus {
+                        name: task_name.clone(),
+                        progress,
+                        is_paused,
+                    });
+                    if is_paused {
+                        self.status_message = format!("{}: {:.0}% (Paused)", task_name, progress * 100.0);
+                    } else {
+                        self.status_message = format!("{}: {:.0}%", task_name, progress * 100.0);
+                    }
                 }
                 WorkerResponse::TaskFinished(msg) => {
                     self.status_message = msg;
+                    self.current_task = None;
                 }
                 WorkerResponse::SaveSyncStatusFetched { app_name, files, local_time, remote_time, error } => {
                     self.save_sync_status = Some(SaveSyncStatus {
@@ -688,6 +917,7 @@ impl eframe::App for LegendaryApp {
                     });
                 }
                 WorkerResponse::InstallInfoFetched(info) => {
+                    self.selected_tags = info.available_tags.iter().cloned().collect();
                     self.install_info = Some(info);
                     self.current_view = View::InstallDialog;
                 }
@@ -715,10 +945,13 @@ impl eframe::App for LegendaryApp {
             }
         }
 
+        let is_task_running = self.current_task.is_some();
+
         egui::SidePanel::left("side_panel")
             .resizable(true)
             .default_width(150.0)
             .show(ctx, |ui| {
+            ui.set_enabled(!is_task_running);
             ui.heading("Legendary Rust");
             ui.add_space(10.0);
             if ui.selectable_label(self.current_view == View::Library, "Library").clicked() {
@@ -726,6 +959,9 @@ impl eframe::App for LegendaryApp {
             }
             if ui.selectable_label(self.current_view == View::Settings, "Settings").clicked() {
                 self.current_view = View::Settings;
+            }
+            if ui.selectable_label(self.current_view == View::Tasks, "Tasks").clicked() {
+                self.current_view = View::Tasks;
             }
             ui.add_space(10.0);
             if self.token.is_none() {
@@ -745,6 +981,9 @@ impl eframe::App for LegendaryApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            let is_task_running = self.current_task.is_some();
+            ui.set_enabled(!is_task_running || self.current_view == View::GameDetail);
+
             match self.current_view {
                 View::Auth => self.show_auth_view(ui),
                 View::Library => self.show_library_view(ui),
@@ -752,11 +991,17 @@ impl eframe::App for LegendaryApp {
                 View::Settings => self.show_settings_view(ui),
                 View::SaveSync => self.show_save_sync_view(ui),
                 View::InstallDialog => self.show_install_dialog_view(ui),
+                View::Tasks => self.show_tasks_view(ui),
             }
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.horizontal(|ui| {
                     ui.label(&self.status_message);
+                    if let Some(task) = &self.current_task {
+                        if self.current_view != View::GameDetail {
+                            ui.add(egui::ProgressBar::new(task.progress).show_percentage());
+                        }
+                    }
                 });
                 ui.separator();
             });
@@ -765,6 +1010,39 @@ impl eframe::App for LegendaryApp {
 }
 
 impl LegendaryApp {
+    fn show_tasks_view(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Tasks");
+        ui.separator();
+
+        if let Some(task) = self.current_task.clone() {
+            ui.group(|ui| {
+                ui.label(format!("Active Task: {}", task.name));
+                ui.add(egui::ProgressBar::new(task.progress).show_percentage());
+                ui.horizontal(|ui| {
+                    if task.is_paused {
+                        if ui.button("Resume").clicked() {
+                            if let Some(t) = &mut self.current_task { t.is_paused = false; }
+                            self.worker_pause.store(false, Ordering::SeqCst);
+                            let _ = self.tx.send(WorkerMsg::ResumeTask);
+                        }
+                    } else {
+                        if ui.button("Pause").clicked() {
+                            if let Some(t) = &mut self.current_task { t.is_paused = true; }
+                            self.worker_pause.store(true, Ordering::SeqCst);
+                            let _ = self.tx.send(WorkerMsg::PauseTask);
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.worker_cancel.store(true, Ordering::SeqCst);
+                        let _ = self.tx.send(WorkerMsg::CancelTask);
+                    }
+                });
+            });
+        } else {
+            ui.label("No active tasks.");
+        }
+    }
+
     fn show_auth_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Authentication");
         ui.label(&self.status_message);
@@ -796,17 +1074,26 @@ impl LegendaryApp {
     fn show_library_view(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Library");
-            if ui.button("Refresh").clicked() {
-                self.installed_games = crate::auth::load_installed_games();
-                let _ = self.tx.send(WorkerMsg::RefreshLibrary);
-
-                if !self.config.global.game_paths.is_empty() {
-                    let _ = self.tx.send(WorkerMsg::ScanGames {
-                        library: self.library.clone(),
-                        search_paths: self.config.global.game_paths.clone(),
-                    });
-                }
+            ui.add_space(20.0);
+            ui.label("Search:");
+            ui.text_edit_singleline(&mut self.search_query);
+            if ui.button("Clear").clicked() {
+                self.search_query.clear();
             }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Refresh").clicked() {
+                    self.installed_games = crate::auth::load_installed_games();
+                    let _ = self.tx.send(WorkerMsg::RefreshLibrary);
+
+                    if !self.config.global.game_paths.is_empty() {
+                        let _ = self.tx.send(WorkerMsg::ScanGames {
+                            library: self.library.clone(),
+                            search_paths: self.config.global.game_paths.clone(),
+                        });
+                    }
+                }
+            });
         });
 
         if self.token.is_none() {
@@ -817,8 +1104,6 @@ impl LegendaryApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.vertical(|ui| {
                 for item in &self.library {
-                    let is_installed = self.installed_games.iter().any(|g| g.app_name == item.app_name);
-
                     let local_meta = crate::auth::load_local_metadata(&item.app_name);
                     let title = local_meta.as_ref()
                         .map(|m| m.app_title.clone())
@@ -827,6 +1112,12 @@ impl LegendaryApp {
                             .and_then(|t| t.as_str())
                             .map(|s| s.to_string()))
                         .unwrap_or_else(|| item.app_name.clone());
+
+                    if !self.search_query.is_empty() && !title.to_lowercase().contains(&self.search_query.to_lowercase()) && !item.app_name.to_lowercase().contains(&self.search_query.to_lowercase()) {
+                        continue;
+                    }
+
+                    let is_installed = self.installed_games.iter().any(|g| g.app_name == item.app_name);
 
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
@@ -1187,7 +1478,24 @@ impl LegendaryApp {
                             ui.add_space(10.0);
                             ui.collapsing("DLCs", |ui| {
                                 for dlc in dlcs {
-                                    ui.label(&dlc.title);
+                                    ui.horizontal(|ui| {
+                                        ui.label(&dlc.title);
+                                        let dlc_installed = self.installed_games.iter().any(|g| g.app_name == dlc.id);
+                                        if dlc_installed {
+                                            ui.label("✅ Installed");
+                                            if ui.button("Uninstall").clicked() {
+                                                let _ = self.tx.send(WorkerMsg::UninstallGame(dlc.id.clone()));
+                                            }
+                                        } else {
+                                            if ui.button("Install").clicked() {
+                                                // We need to fetch install info for DLC first
+                                                let _ = self.tx.send(WorkerMsg::FetchInstallInfo {
+                                                    app_name: dlc.id.clone(),
+                                                    title: dlc.title.clone(),
+                                                });
+                                            }
+                                        }
+                                    });
                                 }
                             });
                         }
@@ -1235,64 +1543,101 @@ impl LegendaryApp {
                 });
 
                 ui.add_space(20.0);
+
+                if let Some(task) = self.current_task.clone() {
+                    ui.group(|ui| {
+                        ui.label(format!("Task: {}", task.name));
+                        ui.add(egui::ProgressBar::new(task.progress).show_percentage());
+                        ui.horizontal(|ui| {
+                            if task.is_paused {
+                                if ui.button("Resume").clicked() {
+                                    if let Some(t) = &mut self.current_task { t.is_paused = false; }
+                                    self.worker_pause.store(false, Ordering::SeqCst);
+                                    let _ = self.tx.send(WorkerMsg::ResumeTask);
+                                }
+                            } else {
+                                if ui.button("Pause").clicked() {
+                                    if let Some(t) = &mut self.current_task { t.is_paused = true; }
+                                    self.worker_pause.store(true, Ordering::SeqCst);
+                                    let _ = self.tx.send(WorkerMsg::PauseTask);
+                                }
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.worker_cancel.store(true, Ordering::SeqCst);
+                                let _ = self.tx.send(WorkerMsg::CancelTask);
+                            }
+                        });
+                    });
+                    ui.add_space(10.0);
+                }
+
                 ui.horizontal(|ui| {
+                    let is_task_running = self.current_task.is_some();
                     let is_running = self.running_processes.contains_key(&app_name);
                     let button_text = if is_running { "Stop Game" } else { "Start Game" };
 
-                    if ui.button(egui::RichText::new(button_text).size(24.0).strong()).clicked() {
-                        if is_running {
-                            if let Some(mut child) = self.running_processes.remove(&app_name) {
-                                let _ = child.kill();
-                                self.status_message = format!("Stopped game: {}", app_name);
+                    ui.add_enabled_ui(!is_task_running, |ui| {
+                        if ui.button(egui::RichText::new(button_text).size(24.0).strong()).clicked() {
+                            if is_running {
+                                if let Some(mut child) = self.running_processes.remove(&app_name) {
+                                    let _ = child.kill();
+                                    self.status_message = format!("Stopped game: {}", app_name);
+                                }
+                            } else {
+                                let offline = self.config.games.get(&app_name).map(|s| s.play_offline).unwrap_or(false);
+                                if offline {
+                                    let can_run_offline = local_meta.as_ref().map(|m| {
+                                        m.metadata.custom_attributes.as_ref().and_then(|attrs| {
+                                            attrs.get("CanRunOffline").map(|a| a.value == "true")
+                                        }).unwrap_or(true)
+                                    }).unwrap_or(true);
+
+                                    if !can_run_offline {
+                                        self.status_message = "Warning: Game may not support offline mode.".to_string();
+                                    }
+                                    self.launch_game_with_token(app_name.clone(), "".to_string());
+                                } else {
+                                    let _ = self.tx.send(WorkerMsg::FetchGameToken(app_name.clone()));
+                                    self.status_message = "Fetching game token...".to_string();
+                                }
+                            }
+                        }
+
+                        let is_installed = self.installed_games.iter().any(|g| g.app_name == app_name);
+                        if !is_installed {
+                            if ui.button(egui::RichText::new("Install").size(24.0).strong()).clicked() {
+                                let _ = self.tx.send(WorkerMsg::FetchInstallInfo {
+                                    app_name: app_name.clone(),
+                                    title: game.title.clone(),
+                                });
                             }
                         } else {
-                            let offline = self.config.games.get(&app_name).map(|s| s.play_offline).unwrap_or(false);
-                            if offline {
-                                let can_run_offline = local_meta.as_ref().map(|m| {
-                                    m.metadata.custom_attributes.as_ref().and_then(|attrs| {
-                                        attrs.get("CanRunOffline").map(|a| a.value == "true")
-                                    }).unwrap_or(true)
-                                }).unwrap_or(true);
+                            if ui.button("Verify").clicked() {
+                                let catalog_item_id = self.library.iter().find(|i| i.app_name == app_name)
+                                    .map(|i| i.catalog_item_id.clone())
+                                    .unwrap_or_default();
+                                let _ = self.tx.send(WorkerMsg::VerifyGame {
+                                    app_name: app_name.clone(),
+                                    catalog_item_id
+                                });
+                            }
+                            if ui.button("Repair").clicked() {
+                                let _ = self.tx.send(WorkerMsg::RepairGame(app_name.clone(), false));
+                            }
+                            if ui.button("Repair and Update").clicked() {
+                                let _ = self.tx.send(WorkerMsg::RepairGame(app_name.clone(), true));
+                            }
+                            if ui.button("Uninstall").clicked() {
+                                let _ = self.tx.send(WorkerMsg::UninstallGame(app_name.clone()));
+                            }
 
-                                if !can_run_offline {
-                                    self.status_message = "Warning: Game may not support offline mode.".to_string();
+                            if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == app_name) {
+                                if ui.button("Open Folder").clicked() {
+                                    let _ = open::that(&installed.install_path);
                                 }
-                                self.launch_game_with_token(app_name.clone(), "".to_string());
-                            } else {
-                                let _ = self.tx.send(WorkerMsg::FetchGameToken(app_name.clone()));
-                                self.status_message = "Fetching game token...".to_string();
                             }
                         }
-                    }
-
-                    let is_installed = self.installed_games.iter().any(|g| g.app_name == app_name);
-                    if !is_installed {
-                        if ui.button(egui::RichText::new("Install").size(24.0).strong()).clicked() {
-                            let _ = self.tx.send(WorkerMsg::FetchInstallInfo {
-                                app_name: app_name.clone(),
-                                title: game.title.clone(),
-                            });
-                        }
-                    } else {
-                        if ui.button("Verify").clicked() {
-                            let catalog_item_id = self.library.iter().find(|i| i.app_name == app_name)
-                                .map(|i| i.catalog_item_id.clone())
-                                .unwrap_or_default();
-                            let _ = self.tx.send(WorkerMsg::VerifyGame {
-                                app_name: app_name.clone(),
-                                catalog_item_id
-                            });
-                        }
-                        if ui.button("Repair").clicked() {
-                            let _ = self.tx.send(WorkerMsg::RepairGame(app_name.clone(), false));
-                        }
-                        if ui.button("Repair and Update").clicked() {
-                            let _ = self.tx.send(WorkerMsg::RepairGame(app_name.clone(), true));
-                        }
-                        if ui.button("Uninstall").clicked() {
-                            let _ = self.tx.send(WorkerMsg::UninstallGame(app_name.clone()));
-                        }
-                    }
+                    });
                 });
             });
         }
@@ -1300,6 +1645,7 @@ impl LegendaryApp {
 
     fn show_install_dialog_view(&mut self, ui: &mut egui::Ui) {
         if let Some(info) = &self.install_info {
+            let app_name = info.app_name.clone();
             ui.heading(format!("Install {}", info.title));
             ui.add_space(10.0);
 
@@ -1323,6 +1669,23 @@ impl LegendaryApp {
                 ui.end_row();
             });
 
+            if !info.available_tags.is_empty() {
+                ui.add_space(20.0);
+                ui.heading("Selective Download:");
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    for tag in &info.available_tags {
+                        let mut selected = self.selected_tags.contains(tag);
+                        if ui.checkbox(&mut selected, tag).changed() {
+                            if selected {
+                                self.selected_tags.insert(tag.clone());
+                            } else {
+                                self.selected_tags.remove(tag);
+                            }
+                        }
+                    }
+                });
+            }
+
             ui.add_space(20.0);
             if info.free_space < info.install_size {
                 ui.colored_label(egui::Color32::RED, "⚠ Not enough disk space!");
@@ -1333,8 +1696,9 @@ impl LegendaryApp {
                     let _ = self.tx.send(WorkerMsg::InstallGame {
                         app_name: info.app_name.clone(),
                         install_path: info.install_path.clone(),
+                        selected_tags: Some(self.selected_tags.clone()),
                     });
-                    self.current_view = View::Library;
+                    self.current_view = View::GameDetail;
                 }
                 if ui.button("Cancel").clicked() {
                     self.current_view = View::GameDetail;
@@ -1583,6 +1947,11 @@ impl LegendaryApp {
     fn show_settings_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Global Settings");
         ui.separator();
+
+        if ui.button("Sync with Epic Games Launcher").clicked() {
+            let _ = self.tx.send(WorkerMsg::EglSync);
+        }
+        ui.add_space(10.0);
 
         ui.label("Game Library Paths:");
         let mut to_remove = None;

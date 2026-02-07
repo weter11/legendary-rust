@@ -97,6 +97,65 @@ pub fn load_local_metadata(app_name: &str) -> Option<crate::models::LocalGameMet
     None
 }
 
+pub fn scan_egl_manifests() -> Vec<crate::models::InstalledGame> {
+    let mut installed = load_installed_games();
+    let mut changed = false;
+
+    let mut manifests_path = std::path::PathBuf::new();
+    if cfg!(target_os = "windows") {
+        if let Some(app_data) = std::env::var_os("PROGRAMDATA") {
+            manifests_path = std::path::PathBuf::from(app_data);
+            manifests_path.push("Epic/EpicGamesLauncher/Data/Manifests");
+        }
+    } else {
+        // On Linux, we might want to check common Wine prefixes or let user specify
+        // For now, let's just use a placeholder or check a default Wine path
+        if let Some(home) = home::home_dir() {
+            manifests_path = home.join(".local/share/Steam/steamapps/compatdata/2344520/pfx/drive_c/users/steamuser/AppData/Local/EpicGamesLauncher/Saved/Manifests");
+            // Note: 2344520 is some random ID, it varies. Better to skip or allow custom path.
+        }
+    }
+
+    if manifests_path.exists() {
+        if let Ok(entries) = std::fs::read_dir(manifests_path) {
+            for entry in entries.flatten() {
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("item") {
+                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        if let Ok(egl_manifest) = serde_json::from_str::<serde_json::Value>(&content) {
+                            let app_name = egl_manifest["AppName"].as_str().unwrap_or_default().to_string();
+                            if app_name.is_empty() || installed.iter().any(|g| g.app_name == app_name) {
+                                continue;
+                            }
+
+                            let install_path = egl_manifest["InstallLocation"].as_str().unwrap_or_default().to_string();
+                            let title = egl_manifest["DisplayName"].as_str().unwrap_or_default().to_string();
+                            let version = egl_manifest["AppVersionString"].as_str().unwrap_or_default().to_string();
+
+                            if !install_path.is_empty() && std::path::Path::new(&install_path).exists() {
+                                let new_game = crate::models::InstalledGame {
+                                    app_name,
+                                    install_path,
+                                    title,
+                                    version,
+                                    install_size: 0, // Will be calculated on load
+                                    download_size: 0,
+                                };
+                                installed.push(new_game);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if changed {
+        let _ = save_installed_games(&installed);
+    }
+    installed
+}
+
 pub fn scan_and_import_games(library: &[crate::models::LibraryItem], search_paths: &[PathBuf]) -> Vec<crate::models::InstalledGame> {
     let mut installed = load_installed_games();
     let mut changed = false;

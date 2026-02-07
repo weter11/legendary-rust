@@ -1929,6 +1929,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "byteorder",
  "chrono",
  "configparser",
  "directories",
@@ -1936,7 +1937,9 @@ dependencies = [
  "egui",
  "egui_extras",
  "env_logger",
+ "flate2",
  "fs2",
+ "hex",
  "home",
  "image",
  "log",
