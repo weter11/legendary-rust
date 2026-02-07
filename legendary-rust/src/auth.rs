@@ -243,16 +243,26 @@ pub fn get_manifest_path(app_name: &str, catalog_item_id: &str) -> Option<PathBu
     let mut p = get_config_dir()?;
     p.push("manifests");
 
-    // Try app_name.manifest
-    let p1 = p.join(format!("{}.manifest", app_name));
-    if p1.exists() {
-        return Some(p1);
-    }
+    if !p.exists() { return None; }
 
-    // Try catalog_item_id.manifest
+    // Try exact matches first
+    let p1 = p.join(format!("{}.manifest", app_name));
+    if p1.exists() { return Some(p1); }
     let p2 = p.join(format!("{}.manifest", catalog_item_id));
-    if p2.exists() {
-        return Some(p2);
+    if p2.exists() { return Some(p2); }
+
+    // Scan for prefixed manifests (e.g. app_name_Windows_label.manifest)
+    if let Ok(entries) = std::fs::read_dir(&p) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
+                    if filename.ends_with(".manifest") && (filename.starts_with(app_name) || filename.starts_with(catalog_item_id)) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
     }
 
     None

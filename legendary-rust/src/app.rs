@@ -507,7 +507,7 @@ impl LegendaryApp {
                                 let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Manifest not found, fetching for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                                 match client.get_game_assets(&game.platform) {
                                     Ok(assets) => {
-                                        if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                        if let Some(asset) = assets.iter().find(|a| a.app_name == app_name || a.catalog_item_id == catalog_item_id) {
                                             match client.get_asset_manifest(&game.platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                                 Ok(manifest_info) => {
                                                     if let Some(url) = find_manifest_url(&manifest_info) {
