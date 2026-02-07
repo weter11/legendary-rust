@@ -477,6 +477,9 @@ impl LegendaryApp {
                     }
                     WorkerMsg::VerifyGame { app_name, catalog_item_id } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Verifying {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
+                        if let Err(e) = client.refresh_if_needed() {
+                            log::warn!("Token refresh failed: {}", e);
+                        }
                         let mut installed = crate::auth::load_installed_games();
                         let game_idx = installed.iter().position(|g| g.app_name == app_name);
 
@@ -547,6 +550,8 @@ impl LegendaryApp {
                                     }
                                     Err(e) => log::error!("Failed to fetch assets for platform {}: {}", game.platform, e),
                                 }
+                            } else {
+                                log::error!("Manifest for {} not found after local lookup and online fetch attempts.", app_name);
                             }
 
                             let game_dir = std::path::Path::new(&game.install_path);
@@ -806,6 +811,9 @@ impl LegendaryApp {
                     }
                     WorkerMsg::InstallGame { app_name, install_path, selected_tags, platform } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Preparing installation for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
+                        if let Err(e) = client.refresh_if_needed() {
+                            log::warn!("Token refresh failed: {}", e);
+                        }
 
                         // Actual implementation: Create directory
                         if let Err(e) = std::fs::create_dir_all(&install_path) {
@@ -1056,37 +1064,36 @@ impl LegendaryApp {
 
                             'search: for exe_path in possible_exes {
                                 if exe_path.exists() {
-                                    let use_umu = game_settings.map(|s| s.use_umu).unwrap_or(config.global.use_umu);
+                                    let comp_tool = game_settings.and_then(|s| s.compatibility_tool.as_ref())
+                                        .or(config.global.compatibility_tool.as_ref());
 
-                                    let mut cmd = if use_umu && std::env::consts::OS == "linux" {
-                                        let mut c = std::process::Command::new("/usr/bin/umu-run");
-                                        let store = game_settings.and_then(|s| s.umu_store.clone()).unwrap_or_else(|| config.global.umu_store.clone());
-                                        c.env("STORE", store);
-                                        c.env("GAMEID", "umu-default");
+                                    let mut cmd = if std::env::consts::OS == "linux" {
+                                        let mut c = match comp_tool {
+                                            Some(CompatibilityTool::UmuLauncher) => {
+                                                let mut command = std::process::Command::new("/usr/bin/umu-run");
+                                                let store = game_settings.and_then(|s| s.umu_store.clone()).unwrap_or_else(|| config.global.umu_store.clone());
+                                                command.env("STORE", store);
+                                                command.env("GAMEID", "umu-default");
 
-                                        let pfx_path = if let Some(gs) = game_settings {
-                                            if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
-                                            else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
-                                            else { get_default_compat_data_path() }
-                                        } else if config.global.use_custom_pfx {
-                                            config.global.custom_pfx_path.clone()
-                                        } else {
-                                            get_default_compat_data_path()
-                                        };
+                                                let pfx_path = if let Some(gs) = game_settings {
+                                                    if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                    else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
+                                                    else { get_default_compat_data_path() }
+                                                } else if config.global.use_custom_pfx {
+                                                    config.global.custom_pfx_path.clone()
+                                                } else {
+                                                    get_default_compat_data_path()
+                                                };
 
-                                        if let Some(path) = pfx_path {
-                                            c.env("WINEPREFIX", path);
-                                        }
+                                                if let Some(path) = pfx_path {
+                                                    command.env("WINEPREFIX", path);
+                                                }
 
-                                        if let Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) = game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
-                                            if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
-                                                c.env("PROTONPATH", path);
+                                                if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
+                                                    command.env("PROTONPATH", path);
+                                                }
+                                                command
                                             }
-                                        }
-                                        c.arg(exe_path);
-                                        c
-                                    } else if std::env::consts::OS == "linux" {
-                                        let mut c = match game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
                                             Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) => {
                                                 if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
                                                     let mut p = path.clone();
@@ -1809,6 +1816,7 @@ impl LegendaryApp {
                             if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::SteamProton), "Steam Proton").changed() { changed = true; }
                             if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::CustomProtonWine), "Custom Proton/Wine").changed() { changed = true; }
                             if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::SystemWine), "System Wine").changed() { changed = true; }
+                            if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::UmuLauncher), "UMU Launcher").changed() { changed = true; }
                         });
 
                         match game_settings.compatibility_tool {
@@ -1839,6 +1847,16 @@ impl LegendaryApp {
                                             }
                                         }
                                     });
+                            }
+                            Some(CompatibilityTool::UmuLauncher) => {
+                                ui.horizontal(|ui| {
+                                    ui.label("UMU Store:");
+                                    let mut store_str = game_settings.umu_store.clone().unwrap_or_default();
+                                    if ui.text_edit_singleline(&mut store_str).changed() {
+                                        game_settings.umu_store = if store_str.is_empty() { None } else { Some(store_str) };
+                                        changed = true;
+                                    }
+                                });
                             }
                             _ => {}
                         }
@@ -1924,20 +1942,6 @@ impl LegendaryApp {
                     }
 
                     ui.add_space(10.0);
-                    if ui.checkbox(&mut game_settings.use_umu, "Use UMU Launcher").changed() {
-                        changed = true;
-                    }
-
-                    if game_settings.use_umu {
-                        ui.horizontal(|ui| {
-                            ui.label("UMU Store:");
-                            let mut store_str = game_settings.umu_store.clone().unwrap_or_default();
-                            if ui.text_edit_singleline(&mut store_str).changed() {
-                                game_settings.umu_store = if store_str.is_empty() { None } else { Some(store_str) };
-                                changed = true;
-                            }
-                        });
-                    }
 
                     ui.add_space(10.0);
                     ui.collapsing("Steam Compatibility Settings", |ui| {
@@ -2527,11 +2531,16 @@ impl LegendaryApp {
             }
 
             ui.add_space(10.0);
-            if ui.checkbox(&mut self.config.global.use_umu, "Use UMU Launcher by default").changed() {
-                changed = true;
-            }
+            ui.label("Default Compatibility Tool:");
+            ui.horizontal(|ui| {
+                if ui.radio_value(&mut self.config.global.compatibility_tool, None, "None/System Wine").changed() { changed = true; }
+                if ui.radio_value(&mut self.config.global.compatibility_tool, Some(CompatibilityTool::SteamProton), "Steam Proton").changed() { changed = true; }
+                if ui.radio_value(&mut self.config.global.compatibility_tool, Some(CompatibilityTool::CustomProtonWine), "Custom Proton/Wine").changed() { changed = true; }
+                if ui.radio_value(&mut self.config.global.compatibility_tool, Some(CompatibilityTool::SystemWine), "System Wine").changed() { changed = true; }
+                if ui.radio_value(&mut self.config.global.compatibility_tool, Some(CompatibilityTool::UmuLauncher), "UMU Launcher").changed() { changed = true; }
+            });
 
-            if self.config.global.use_umu {
+            if self.config.global.compatibility_tool == Some(CompatibilityTool::UmuLauncher) {
                 ui.horizontal(|ui| {
                     ui.label("Default UMU Store:");
                     if ui.text_edit_singleline(&mut self.config.global.umu_store).changed() {

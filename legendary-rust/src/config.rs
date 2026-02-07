@@ -13,6 +13,8 @@ pub struct AppConfig {
 pub struct GlobalSettings {
     pub game_paths: Vec<PathBuf>,
     #[serde(default)]
+    pub compatibility_tool: Option<CompatibilityTool>,
+    #[serde(default)]
     pub use_custom_pfx: bool,
     #[serde(default)]
     pub custom_pfx_path: Option<PathBuf>,
@@ -20,8 +22,6 @@ pub struct GlobalSettings {
     pub pre_launch_command: String,
     #[serde(default)]
     pub eos_overlay_enabled: bool,
-    #[serde(default)]
-    pub use_umu: bool,
     #[serde(default = "default_store")]
     pub umu_store: String,
     #[serde(default)]
@@ -42,11 +42,11 @@ impl Default for GlobalSettings {
     fn default() -> Self {
         Self {
             game_paths: Vec::new(),
+            compatibility_tool: None,
             use_custom_pfx: false,
             custom_pfx_path: None,
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
-            use_umu: false,
             umu_store: default_store(),
             steam_compat_install_path: None,
             steam_compat_client_install_path: None,
@@ -79,8 +79,6 @@ pub struct GameSettings {
     #[serde(default = "default_true")]
     pub eos_overlay_enabled: bool,
     #[serde(default)]
-    pub use_umu: bool,
-    #[serde(default)]
     pub umu_store: Option<String>,
     #[serde(default)]
     pub steam_compat_install_path: Option<PathBuf>,
@@ -111,7 +109,6 @@ impl Default for GameSettings {
             custom_pfx_path: None,
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
-            use_umu: false,
             umu_store: None,
             steam_compat_install_path: None,
             steam_compat_client_install_path: None,
@@ -126,6 +123,7 @@ pub enum CompatibilityTool {
     SteamProton,
     CustomProtonWine,
     SystemWine,
+    UmuLauncher,
 }
 
 impl AppConfig {
