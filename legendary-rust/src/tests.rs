@@ -37,4 +37,30 @@ mod tests {
         assert_eq!(token.access_token, "abc");
         assert_eq!(token.display_name.unwrap(), "User");
     }
+
+    #[test]
+    fn test_entitlement_deserialization() {
+        let json = r#"{
+            "entitlementId": "ent_id",
+            "entitlementName": "ent_name",
+            "namespace": "ns",
+            "catalogItemId": "item_id",
+            "accountId": "acc_id",
+            "identityId": "id_id",
+            "entitlementType": "EXECUTABLE",
+            "grantDate": "2023-01-01T00:00:00Z"
+        }"#;
+        let ent: Entitlement = serde_json::from_str(json).unwrap();
+        assert_eq!(ent.entitlement_id, "ent_id");
+        assert_eq!(ent.entitlement_type, "EXECUTABLE");
+    }
+
+    #[test]
+    fn test_download_ticket_deserialization() {
+        let json = r#"{
+            "manifestUrl": "https://example.com/manifest"
+        }"#;
+        let ticket: DownloadTicket = serde_json::from_str(json).unwrap();
+        assert_eq!(ticket.manifest_url, "https://example.com/manifest");
+    }
 }

@@ -40,6 +40,7 @@ pub struct LegendaryApp {
     install_info: Option<crate::models::InstallInfo>,
     selected_tags: HashSet<String>,
     current_task: Option<TaskStatus>,
+    manifest_files: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -63,6 +64,7 @@ pub struct SaveSyncStatus {
 
 pub(crate) enum WorkerMsg {
     Login(String),
+    LoginSid(String),
     RefreshLibrary,
     FetchGameInfo(String, String), // namespace, catalog_item_id
     FetchAssets,
@@ -104,6 +106,7 @@ pub(crate) enum WorkerMsg {
         app_name: String,
         install_path: std::path::PathBuf,
         selected_tags: Option<HashSet<String>>,
+        platform: String,
     },
     UninstallGame(String),
     ScanGames {
@@ -112,6 +115,14 @@ pub(crate) enum WorkerMsg {
     },
     EglSync,
     FetchGameToken(String),
+    ListFiles {
+        app_name: String,
+        catalog_item_id: String,
+    },
+    LaunchGame {
+        app_name: String,
+        token: String,
+    },
 }
 
 pub(crate) enum WorkerResponse {
@@ -145,6 +156,11 @@ pub(crate) enum WorkerResponse {
     GameTokenFetched {
         app_name: String,
         token: String,
+    },
+    FilesListed(Vec<String>),
+    GameLaunched {
+        app_name: String,
+        child: std::process::Child,
     },
 }
 
@@ -305,24 +321,16 @@ impl LegendaryApp {
 
             // Try initial load
             if let Ok(saved_token) = crate::auth::load_token() {
-                client.set_token(&saved_token.access_token);
+                client.set_token(&saved_token);
                 match client.get_library_items() {
                     Ok(items) => {
                         let _ = tx.send(WorkerResponse::LoggedIn(saved_token));
                         let _ = tx.send(WorkerResponse::LibraryFetched(items));
                         ctx_clone.request_repaint();
                     }
-                    Err(_) => {
-                        if let Some(refresh_token) = &saved_token.refresh_token {
-                            if let Ok(new_token) = client.refresh_session(refresh_token) {
-                                let _ = crate::auth::save_token(&new_token);
-                                if let Ok(items) = client.get_library_items() {
-                                    let _ = tx.send(WorkerResponse::LoggedIn(new_token));
-                                    let _ = tx.send(WorkerResponse::LibraryFetched(items));
-                                    ctx_clone.request_repaint();
-                                }
-                            }
-                        }
+                    Err(e) => {
+                        log::error!("Initial library fetch failed: {}", e);
+                        // refresh_if_needed is called inside get_library_items, so if it still fails here, it might be fatal or need re-login
                     }
                 }
             }
@@ -343,6 +351,21 @@ impl LegendaryApp {
                     WorkerMsg::Login(code) => {
                         let _ = tx.send(WorkerResponse::Error("Logging in...".to_string()));
                         match client.start_session(&code) {
+                            Ok(token) => {
+                                let _ = crate::auth::save_token(&token);
+                                let _ = tx.send(WorkerResponse::LoggedIn(token));
+                                // Fetch library immediately after login
+                                if let Ok(items) = client.get_library_items() {
+                                    let _ = tx.send(WorkerResponse::LibraryFetched(items));
+                                    ctx_clone.request_repaint();
+                                }
+                            }
+                            Err(e) => { let _ = tx.send(WorkerResponse::Error(e.to_string())); }
+                        }
+                    }
+                    WorkerMsg::LoginSid(sid) => {
+                        let _ = tx.send(WorkerResponse::Error("Logging in with SID...".to_string()));
+                        match client.start_session_with_sid(&sid) {
                             Ok(token) => {
                                 let _ = crate::auth::save_token(&token);
                                 let _ = tx.send(WorkerResponse::LoggedIn(token));
@@ -427,11 +450,11 @@ impl LegendaryApp {
                         }
                     }
                     WorkerMsg::Logout => {
+                        let _ = client.invalidate_session();
                         let _ = crate::auth::get_config_dir().map(|d| {
                             let _ = std::fs::remove_file(d.join("user.json"));
                             let _ = std::fs::remove_file(d.join("token.json"));
                         });
-                        // Clear client token too if needed
                     }
                     WorkerMsg::VerifyGame { app_name, catalog_item_id } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Verifying {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
@@ -445,31 +468,53 @@ impl LegendaryApp {
 
                             if let Some(manifest_path) = manifest_path_opt {
                                 let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Reading manifest at {:?}", manifest_path), progress: 0.0, is_paused: false, speed: None, eta: None });
-                                if let Ok(data) = std::fs::read(&manifest_path) {
-                                    manifest_opt = crate::manifest::parse_manifest(&data).ok();
+                                match std::fs::read(&manifest_path) {
+                                    Ok(data) => {
+                                        match crate::manifest::parse_manifest(&data) {
+                                            Ok(m) => manifest_opt = Some(m),
+                                            Err(e) => log::error!("Failed to parse manifest at {:?}: {}", manifest_path, e),
+                                        }
+                                    }
+                                    Err(e) => log::error!("Failed to read manifest at {:?}: {}", manifest_path, e),
                                 }
                             }
 
                             if manifest_opt.is_none() {
                                 // Try to download manifest
                                 let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Manifest not found, fetching for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
-                                if let Ok(assets) = client.get_game_assets("Windows") {
-                                    if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
-                                        if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                            if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
-                                                if let Ok(manifest_data) = client.download_manifest(&url) {
-                                                    // Save manifest
-                                                    if let Some(mut p) = crate::auth::get_config_dir() {
-                                                        p.push("manifests");
-                                                        let _ = std::fs::create_dir_all(&p);
-                                                        let manifest_path = p.join(format!("{}.manifest", app_name));
-                                                        let _ = std::fs::write(&manifest_path, &manifest_data);
+                                match client.get_game_assets(&game.platform) {
+                                    Ok(assets) => {
+                                        if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                            match client.get_asset_manifest(&game.platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
+                                                Ok(manifest_info) => {
+                                                    if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                                        match client.download_manifest(&url) {
+                                                            Ok(manifest_data) => {
+                                                                // Save manifest
+                                                                if let Some(mut p) = crate::auth::get_config_dir() {
+                                                                    p.push("manifests");
+                                                                    let _ = std::fs::create_dir_all(&p);
+                                                                    let manifest_path = p.join(format!("{}.manifest", app_name));
+                                                                    let _ = std::fs::write(&manifest_path, &manifest_data);
+                                                                }
+                                                                match crate::manifest::parse_manifest(&manifest_data) {
+                                                                    Ok(m) => manifest_opt = Some(m),
+                                                                    Err(e) => log::error!("Failed to parse downloaded manifest for {}: {}", app_name, e),
+                                                                }
+                                                            }
+                                                            Err(e) => log::error!("Failed to download manifest for {}: {}", app_name, e),
+                                                        }
+                                                    } else {
+                                                        log::error!("Manifest URL not found in asset manifest for {}", app_name);
                                                     }
-                                                    manifest_opt = crate::manifest::parse_manifest(&manifest_data).ok();
                                                 }
+                                                Err(e) => log::error!("Failed to fetch asset manifest for {}: {}", app_name, e),
                                             }
+                                        } else {
+                                            log::error!("Asset not found for {} on platform {}", app_name, game.platform);
                                         }
                                     }
+                                    Err(e) => log::error!("Failed to fetch assets for platform {}: {}", game.platform, e),
                                 }
                             }
 
@@ -728,7 +773,7 @@ impl LegendaryApp {
                         let _ = tx.send(WorkerResponse::InstallInfoFetched(info));
                         ctx_clone.request_repaint();
                     }
-                    WorkerMsg::InstallGame { app_name, install_path, selected_tags } => {
+                    WorkerMsg::InstallGame { app_name, install_path, selected_tags, platform } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Preparing installation for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
 
                         // Actual implementation: Create directory
@@ -743,24 +788,37 @@ impl LegendaryApp {
                         let mut manifest_data_opt = None;
                         let mut base_url_opt = None;
 
-                        if let Ok(assets) = client.get_game_assets("Windows") {
-                            if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
-                                if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                    if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
-                                        if let Ok(data) = client.download_manifest(&url) {
-                                            // Save manifest
-                                            if let Some(mut p) = crate::auth::get_config_dir() {
-                                                p.push("manifests");
-                                                let _ = std::fs::create_dir_all(&p);
-                                                let manifest_path = p.join(format!("{}.manifest", app_name));
-                                                let _ = std::fs::write(&manifest_path, &data);
+                        match client.get_game_assets(&platform) {
+                            Ok(assets) => {
+                                if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                    match client.get_asset_manifest(&platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
+                                        Ok(manifest_info) => {
+                                            if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                                match client.download_manifest(&url) {
+                                                    Ok(data) => {
+                                                        // Save manifest
+                                                        if let Some(mut p) = crate::auth::get_config_dir() {
+                                                            p.push("manifests");
+                                                            let _ = std::fs::create_dir_all(&p);
+                                                            let manifest_path = p.join(format!("{}.manifest", app_name));
+                                                            let _ = std::fs::write(&manifest_path, &data);
+                                                        }
+                                                        manifest_data_opt = Some(data);
+                                                        base_url_opt = Some(url.split('?').next().unwrap_or(&url).rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| url.to_string()));
+                                                    }
+                                                    Err(e) => log::error!("Failed to download manifest for {}: {}", app_name, e),
+                                                }
+                                            } else {
+                                                log::error!("Manifest URL not found in asset manifest for {}", app_name);
                                             }
-                                            manifest_data_opt = Some(data);
-                                            base_url_opt = Some(url.split('?').next().unwrap_or(&url).rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| url.to_string()));
                                         }
+                                        Err(e) => log::error!("Failed to fetch asset manifest for {}: {}", app_name, e),
                                     }
+                                } else {
+                                    log::error!("Asset not found for {} on platform {}", app_name, platform);
                                 }
                             }
+                            Err(e) => log::error!("Failed to fetch assets for platform {}: {}", platform, e),
                         }
 
                         let mut success = false;
@@ -794,6 +852,7 @@ impl LegendaryApp {
                                 version: "1.0.0".to_string(),
                                 install_size: 10 * 1024 * 1024, // 10MB simulated
                                 download_size: 5 * 1024 * 1024,
+                                platform: platform.clone(),
                             });
                             let _ = crate::auth::save_installed_games(&installed);
 
@@ -849,6 +908,248 @@ impl LegendaryApp {
                         }
                         ctx_clone.request_repaint();
                     }
+                    WorkerMsg::ListFiles { app_name, catalog_item_id } => {
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Listing files for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
+
+                        let manifest_path_opt = crate::auth::get_manifest_path(&app_name, &catalog_item_id);
+                        let mut manifest_opt = None;
+
+                        if let Some(manifest_path) = manifest_path_opt {
+                            if let Ok(data) = std::fs::read(&manifest_path) {
+                                manifest_opt = crate::manifest::parse_manifest(&data).ok();
+                            }
+                        }
+
+                        if manifest_opt.is_none() {
+                             // Try common platforms if not found
+                             for platform in &["Windows", "Mac", "Linux"] {
+                                if let Ok(assets) = client.get_game_assets(platform) {
+                                    if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                        if let Ok(manifest_info) = client.get_asset_manifest(platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
+                                            if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                                if let Ok(manifest_data) = client.download_manifest(&url) {
+                                                    manifest_opt = crate::manifest::parse_manifest(&manifest_data).ok();
+                                                    if manifest_opt.is_some() { break; }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                             }
+                        }
+
+                        if let Some(manifest) = manifest_opt {
+                            let files = manifest.list_files();
+                            let _ = tx.send(WorkerResponse::FilesListed(files));
+                            let _ = tx.send(WorkerResponse::TaskFinished(format!("Listed files for {}", app_name)));
+                        } else {
+                            let _ = tx.send(WorkerResponse::Error(format!("Could not find manifest for {}", app_name)));
+                        }
+                        ctx_clone.request_repaint();
+                    }
+                    WorkerMsg::LaunchGame { app_name, token } => {
+                        let installed_games = crate::auth::load_installed_games();
+                        let installed = installed_games.iter().find(|g| g.app_name == app_name).cloned();
+                        if let Some(installed) = installed {
+                            let local_meta = crate::auth::load_local_metadata(&app_name);
+                            let path = std::path::PathBuf::from(&installed.install_path);
+                            let config = AppConfig::load();
+                            let mut found = false;
+
+                            let game_settings = config.games.get(&app_name);
+
+                            // Pre-launch command
+                            let pre_launch = if let Some(gs) = game_settings {
+                                if !gs.pre_launch_command.is_empty() { Some(&gs.pre_launch_command) }
+                                else if !config.global.pre_launch_command.is_empty() { Some(&config.global.pre_launch_command) }
+                                else { None }
+                            } else if !config.global.pre_launch_command.is_empty() {
+                                Some(&config.global.pre_launch_command)
+                            } else {
+                                None
+                            };
+
+                            if let Some(cmd_str) = pre_launch {
+                                log::info!("Running pre-launch command: {}", cmd_str);
+                                let mut parts = cmd_str.split_whitespace();
+                                if let Some(program) = parts.next() {
+                                    let mut child = std::process::Command::new(program);
+                                    for arg in parts {
+                                        child.arg(arg);
+                                    }
+                                    match child.spawn().and_then(|mut c| c.wait()) {
+                                        Ok(status) => {
+                                            if !status.success() {
+                                                log::error!("Pre-launch command failed with status: {}", status);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!("Failed to run pre-launch command: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+
+                            let custom_exe = game_settings.and_then(|s| s.custom_exe_path.clone());
+
+                            let mut possible_exes = Vec::new();
+                            if let Some(ce) = custom_exe {
+                                possible_exes.push(ce);
+                            } else {
+                                let mut possible_names = vec![app_name.clone()];
+                                if let Some(meta) = &local_meta {
+                                    if let Some(attrs) = &meta.metadata.custom_attributes {
+                                        if let Some(folder) = attrs.get("FolderName") {
+                                            possible_names.push(folder.value.clone());
+                                        }
+                                    }
+                                }
+
+                                for name in possible_names {
+                                    for ext in &["exe", "sh", ""] {
+                                        let filename = if ext.is_empty() { name.clone() } else { format!("{}.{}", name, ext) };
+                                        possible_exes.push(path.join(filename));
+                                    }
+                                }
+                            }
+
+                            'search: for exe_path in possible_exes {
+                                if exe_path.exists() {
+                                    let umu_path = game_settings.and_then(|s| s.umu_path.clone()).or_else(|| config.global.umu_path.clone());
+
+                                    let mut cmd = if let Some(umu) = umu_path {
+                                        let mut c = std::process::Command::new(umu);
+                                        c.arg(exe_path);
+                                        c
+                                    } else if std::env::consts::OS == "linux" {
+                                        let mut c = match game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
+                                            Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) => {
+                                                if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
+                                                    let mut p = path.clone();
+                                                    p.push("proton"); // Typical proton entry point
+                                                    let is_proton = p.exists();
+                                                    if !is_proton {
+                                                        p.pop();
+                                                        p.push("bin/wine");
+                                                    }
+                                                    let mut command = std::process::Command::new(p);
+                                                    if is_proton {
+                                                        let pfx_path = if let Some(gs) = game_settings {
+                                                            if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                            else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
+                                                            else { get_default_compat_data_path() }
+                                                        } else if config.global.use_custom_pfx {
+                                                            config.global.custom_pfx_path.clone()
+                                                        } else {
+                                                            get_default_compat_data_path()
+                                                        };
+
+                                                        if let Some(path) = pfx_path {
+                                                            command.env("STEAM_COMPAT_DATA_PATH", path);
+                                                        }
+                                                        if let Some(home) = home::home_dir() {
+                                                            command.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", home.join(".local/share/Steam"));
+                                                        }
+                                                        command.arg("run");
+                                                    } else {
+                                                        // Custom/System Wine
+                                                        let pfx_path = if let Some(gs) = game_settings {
+                                                            if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                            else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
+                                                            else { None }
+                                                        } else if config.global.use_custom_pfx {
+                                                            config.global.custom_pfx_path.clone()
+                                                        } else {
+                                                            None
+                                                        };
+                                                        if let Some(path) = pfx_path {
+                                                            command.env("WINEPREFIX", path);
+                                                        }
+                                                    }
+                                                    command
+                                                } else {
+                                                    let mut command = std::process::Command::new("wine");
+                                                    let pfx_path = if let Some(gs) = game_settings {
+                                                        if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                        else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
+                                                        else { None }
+                                                    } else if config.global.use_custom_pfx {
+                                                        config.global.custom_pfx_path.clone()
+                                                    } else {
+                                                        None
+                                                    };
+                                                    if let Some(path) = pfx_path {
+                                                        command.env("WINEPREFIX", path);
+                                                    }
+                                                    command
+                                                }
+                                            }
+                                            Some(CompatibilityTool::SystemWine) | None => {
+                                                let mut command = std::process::Command::new("wine");
+                                                let pfx_path = if let Some(gs) = game_settings {
+                                                    if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                    else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
+                                                    else { None }
+                                                } else if config.global.use_custom_pfx {
+                                                    config.global.custom_pfx_path.clone()
+                                                } else {
+                                                    None
+                                                };
+                                                if let Some(path) = pfx_path {
+                                                    command.env("WINEPREFIX", path);
+                                                }
+                                                command
+                                            }
+                                        };
+                                        c.arg(exe_path);
+                                        c
+                                    } else {
+                                        std::process::Command::new(exe_path)
+                                    };
+
+                                    // Epic arguments
+                                    cmd.arg("-AUTH_LOGIN=unused");
+                                    cmd.arg(format!("-AUTH_PASSWORD={}", token));
+                                    cmd.arg("-AUTH_TYPE=exchangecode");
+                                    cmd.arg(format!("-epicapp={}", app_name));
+                                    cmd.arg("-epicenv=Prod");
+
+                                    let overlay_enabled = if let Some(gs) = game_settings {
+                                        gs.eos_overlay_enabled
+                                    } else {
+                                        config.global.eos_overlay_enabled
+                                    };
+
+                                    if !overlay_enabled {
+                                        cmd.env("EOS_OVERLAY_KILLED", "1");
+                                    }
+
+                                    if let Some(settings) = game_settings {
+                                        if settings.play_offline {
+                                            cmd.arg("-offline");
+                                        }
+                                        for param in settings.start_params.split_whitespace() {
+                                            cmd.arg(param);
+                                        }
+                                    }
+
+                                    match cmd.spawn() {
+                                        Ok(child) => {
+                                            let _ = tx.send(WorkerResponse::GameLaunched { app_name: app_name.clone(), child });
+                                            found = true;
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(WorkerResponse::Error(format!("Failed to spawn process: {}", e)));
+                                        }
+                                    }
+                                    break 'search;
+                                }
+                            }
+                            if !found {
+                                let _ = tx.send(WorkerResponse::Error(format!("Could not find executable in {}", installed.install_path)));
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -876,6 +1177,7 @@ impl LegendaryApp {
             install_info: None,
             selected_tags: HashSet::new(),
             current_task: None,
+            manifest_files: Vec::new(),
         }
     }
 }
@@ -968,7 +1270,13 @@ impl eframe::App for LegendaryApp {
                     self.installed_games = games;
                 }
                 WorkerResponse::GameTokenFetched { app_name, token } => {
-                    self.launch_game_with_token(app_name, token);
+                    let _ = self.tx.send(WorkerMsg::LaunchGame { app_name, token });
+                }
+                WorkerResponse::FilesListed(files) => {
+                    self.manifest_files = files;
+                }
+                WorkerResponse::GameLaunched { app_name, child } => {
+                    self.running_processes.insert(app_name, child);
                 }
             }
         }
@@ -1084,27 +1392,54 @@ impl LegendaryApp {
         ui.label(&self.status_message);
 
         ui.separator();
-        ui.label("How to log in:");
-        ui.label("1. Click the button below to open the Epic Games login page in your browser.");
-        ui.label("2. After logging in, you will see a JSON response containing 'authorizationCode'.");
-        ui.label("3. Copy that code and paste it into the field below.");
-        ui.label("4. Click 'Log In' to complete the process.");
 
-        if ui.button("Open Login URL").clicked() {
-            let url = crate::api::EgsClient::get_auth_url();
-            let _ = open::that(url);
-            self.status_message = "Waiting for authorization code...".to_string();
-        }
+        ui.collapsing("Login with Authorization Code", |ui| {
+            ui.label("How to log in:");
+            ui.label("1. Click the button below to open the Epic Games login page in your browser.");
+            ui.label("2. After logging in, you will see a JSON response containing 'authorizationCode'.");
+            ui.label("3. Copy that code and paste it into the field below.");
+            ui.label("4. Click 'Log In' to complete the process.");
 
-        ui.horizontal(|ui| {
-            ui.label("Authorization Code:");
-            ui.text_edit_singleline(&mut self.auth_code);
+            if ui.button("Open Login URL").clicked() {
+                let url = crate::api::EgsClient::get_auth_url();
+                let _ = open::that(url);
+                self.status_message = "Waiting for authorization code...".to_string();
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Authorization Code:");
+                ui.text_edit_singleline(&mut self.auth_code);
+            });
+
+            if ui.button("Log In").clicked() {
+                let _ = self.tx.send(WorkerMsg::Login(self.auth_code.clone()));
+                self.status_message = "Logging in...".to_string();
+            }
         });
 
-        if ui.button("Log In").clicked() {
-            let _ = self.tx.send(WorkerMsg::Login(self.auth_code.clone()));
-            self.status_message = "Logging in...".to_string();
-        }
+        ui.add_space(10.0);
+
+        ui.collapsing("Login with SID", |ui| {
+            ui.label("1. Click the button below to open the Epic Games SID page.");
+            ui.label("2. You must be already logged in to Epic Games in your browser.");
+            ui.label("3. You will see a JSON response containing 'sid'.");
+            ui.label("4. Copy that SID and paste it into the field below.");
+
+            if ui.button("Open SID URL").clicked() {
+                let _ = open::that("https://www.epicgames.com/id/api/sid");
+                self.status_message = "Waiting for SID...".to_string();
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("SID:");
+                ui.text_edit_singleline(&mut self.auth_code);
+            });
+
+            if ui.button("Log In with SID").clicked() {
+                let _ = self.tx.send(WorkerMsg::LoginSid(self.auth_code.clone()));
+                self.status_message = "Logging in with SID...".to_string();
+            }
+        });
     }
 
     fn show_library_view(&mut self, ui: &mut egui::Ui) {
@@ -1206,177 +1541,6 @@ impl LegendaryApp {
         });
     }
 
-    fn launch_game_with_token(&mut self, app_name: String, token: String) {
-        let installed = self.installed_games.iter().find(|g| g.app_name == app_name).cloned();
-        if let Some(installed) = installed {
-            let local_meta = crate::auth::load_local_metadata(&app_name);
-            let path = std::path::PathBuf::from(&installed.install_path);
-            let mut found = false;
-
-            let game_settings = self.config.games.get(&app_name);
-            let custom_exe = game_settings.and_then(|s| s.custom_exe_path.clone());
-
-            let mut possible_exes = Vec::new();
-            if let Some(ce) = custom_exe {
-                possible_exes.push(ce);
-            } else {
-                let mut possible_names = vec![app_name.clone()];
-                if let Some(meta) = &local_meta {
-                    if let Some(attrs) = &meta.metadata.custom_attributes {
-                        if let Some(folder) = attrs.get("FolderName") {
-                            possible_names.push(folder.value.clone());
-                        }
-                    }
-                }
-
-                for name in possible_names {
-                    for ext in &["exe", "sh", ""] {
-                        let filename = if ext.is_empty() { name.clone() } else { format!("{}.{}", name, ext) };
-                        possible_exes.push(path.join(filename));
-                    }
-                }
-            }
-
-            'search: for exe_path in possible_exes {
-                if exe_path.exists() {
-                        self.status_message = format!("Launching: {:?}", exe_path);
-                        let mut cmd = if std::env::consts::OS == "linux" {
-                            let game_settings = self.config.games.get(&app_name);
-                            let mut c = match game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
-                                Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) => {
-                                    if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
-                                        let mut p = path.clone();
-                                        p.push("proton"); // Typical proton entry point
-                                        let is_proton = p.exists();
-                                        if !is_proton {
-                                            p.pop();
-                                            p.push("bin/wine");
-                                        }
-                                        let mut command = std::process::Command::new(p);
-                                        if is_proton {
-                                            let pfx_path = if let Some(gs) = game_settings {
-                                                if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
-                                                else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
-                                                else { get_default_compat_data_path() }
-                                            } else if self.config.global.use_custom_pfx {
-                                                self.config.global.custom_pfx_path.clone()
-                                            } else {
-                                                get_default_compat_data_path()
-                                            };
-
-                                            if let Some(path) = pfx_path {
-                                                command.env("STEAM_COMPAT_DATA_PATH", path);
-                                            }
-                                            if let Some(home) = home::home_dir() {
-                                                command.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", home.join(".local/share/Steam"));
-                                            }
-                                            command.arg("run");
-                                        } else {
-                                            // Custom/System Wine
-                                            let pfx_path = if let Some(gs) = game_settings {
-                                                if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
-                                                else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
-                                                else { None }
-                                            } else if self.config.global.use_custom_pfx {
-                                                self.config.global.custom_pfx_path.clone()
-                                            } else {
-                                                None
-                                            };
-                                            if let Some(path) = pfx_path {
-                                                command.env("WINEPREFIX", path);
-                                            }
-                                        }
-                                        command
-                                    } else {
-                                        let mut command = std::process::Command::new("wine");
-                                        let pfx_path = if let Some(gs) = game_settings {
-                                            if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
-                                            else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
-                                            else { None }
-                                        } else if self.config.global.use_custom_pfx {
-                                            self.config.global.custom_pfx_path.clone()
-                                        } else {
-                                            None
-                                        };
-                                        if let Some(path) = pfx_path {
-                                            command.env("WINEPREFIX", path);
-                                        }
-                                        command
-                                    }
-                                }
-                                Some(CompatibilityTool::SystemWine) | None => {
-                                    let mut command = std::process::Command::new("wine");
-                                    let pfx_path = if let Some(gs) = game_settings {
-                                        if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
-                                        else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
-                                        else { None }
-                                    } else if self.config.global.use_custom_pfx {
-                                        self.config.global.custom_pfx_path.clone()
-                                    } else {
-                                        None
-                                    };
-                                    if let Some(path) = pfx_path {
-                                        command.env("WINEPREFIX", path);
-                                    }
-                                    command
-                                }
-                            };
-                            c.arg(exe_path);
-
-                            // Epic arguments
-                            c.arg("-AUTH_LOGIN=unused");
-                            c.arg(format!("-AUTH_PASSWORD={}", token));
-                            c.arg("-AUTH_TYPE=exchangecode");
-                            c.arg(format!("-epicapp={}", app_name));
-                            c.arg("-epicenv=Prod");
-
-                            if let Some(settings) = game_settings {
-                                if settings.play_offline {
-                                    c.arg("-offline");
-                                }
-                                for param in settings.start_params.split_whitespace() {
-                                    c.arg(param);
-                                }
-                            }
-                            c
-                        } else {
-                            let mut command = std::process::Command::new(exe_path);
-
-                            // Epic arguments
-                            command.arg("-AUTH_LOGIN=unused");
-                            command.arg(format!("-AUTH_PASSWORD={}", token));
-                            command.arg("-AUTH_TYPE=exchangecode");
-                            command.arg(format!("-epicapp={}", app_name));
-                            command.arg("-epicenv=Prod");
-
-                            if let Some(settings) = self.config.games.get(&app_name) {
-                                if settings.play_offline {
-                                    command.arg("-offline");
-                                }
-                                for param in settings.start_params.split_whitespace() {
-                                    command.arg(param);
-                                }
-                            }
-                            command
-                        };
-
-                        match cmd.spawn() {
-                            Ok(child) => {
-                                self.running_processes.insert(app_name.clone(), child);
-                                found = true;
-                            }
-                            Err(e) => {
-                                self.status_message = format!("Failed to spawn process: {}", e);
-                            }
-                        }
-                        break 'search;
-                    }
-            }
-            if !found {
-                self.status_message = format!("Could not find executable in {}", installed.install_path);
-            }
-        }
-    }
 
     fn show_game_detail_view(&mut self, ui: &mut egui::Ui) {
         let selected_game = self.selected_game.clone();
@@ -1644,8 +1808,54 @@ impl LegendaryApp {
                         }
                     });
 
+                    ui.add_space(10.0);
+                    ui.label("Pre-launch Command:");
+                    if ui.text_edit_singleline(&mut game_settings.pre_launch_command).changed() {
+                        changed = true;
+                    }
+
+                    if ui.checkbox(&mut game_settings.eos_overlay_enabled, "Enable EOS Overlay").changed() {
+                        changed = true;
+                    }
+
+                    ui.add_space(10.0);
+                    ui.label("UMU Launcher Path (optional):");
+                    ui.horizontal(|ui| {
+                        let mut umu_str = game_settings.umu_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                        if ui.text_edit_singleline(&mut umu_str).changed() {
+                            game_settings.umu_path = if umu_str.is_empty() { None } else { Some(std::path::PathBuf::from(umu_str)) };
+                            changed = true;
+                        }
+                        if ui.button("Browse...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                game_settings.umu_path = Some(path);
+                                changed = true;
+                            }
+                        }
+                    });
+
                     if changed {
                         let _ = self.config.save();
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.collapsing("Manifest Files", |ui| {
+                    if ui.button("Fetch/Refresh File List").clicked() {
+                        let catalog_item_id = self.library.iter().find(|i| i.app_name == app_name)
+                            .map(|i| i.catalog_item_id.clone())
+                            .unwrap_or_default();
+                        let _ = self.tx.send(WorkerMsg::ListFiles {
+                            app_name: app_name.clone(),
+                            catalog_item_id,
+                        });
+                    }
+                    if !self.manifest_files.is_empty() {
+                        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                            for file in &self.manifest_files {
+                                ui.label(file);
+                            }
+                        });
                     }
                 });
 
@@ -1727,6 +1937,7 @@ impl LegendaryApp {
                                     app_name: app_name.clone(),
                                     catalog_item_id
                                 });
+                                self.current_view = View::Tasks;
                             }
                             if ui.button("Repair").clicked() {
                                 let _ = self.tx.send(WorkerMsg::RepairGame(app_name.clone(), false));
@@ -1804,8 +2015,9 @@ impl LegendaryApp {
                         app_name: info.app_name.clone(),
                         install_path: info.install_path.clone(),
                         selected_tags: Some(self.selected_tags.clone()),
+                        platform: "Windows".to_string(), // Default to Windows for now
                     });
-                    self.current_view = View::GameDetail;
+                    self.current_view = View::Tasks;
                 }
                 if ui.button("Cancel").clicked() {
                     self.current_view = View::GameDetail;
@@ -2081,6 +2293,31 @@ impl LegendaryApp {
                     }
                 });
             }
+            ui.add_space(10.0);
+            ui.label("Global Pre-launch Command:");
+            if ui.text_edit_singleline(&mut self.config.global.pre_launch_command).changed() {
+                changed = true;
+            }
+            if ui.checkbox(&mut self.config.global.eos_overlay_enabled, "Enable EOS Overlay by default").changed() {
+                changed = true;
+            }
+
+            ui.add_space(10.0);
+            ui.label("Global UMU Launcher Path:");
+            ui.horizontal(|ui| {
+                let mut umu_str = self.config.global.umu_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                if ui.text_edit_singleline(&mut umu_str).changed() {
+                    self.config.global.umu_path = if umu_str.is_empty() { None } else { Some(std::path::PathBuf::from(umu_str)) };
+                    changed = true;
+                }
+                if ui.button("Browse...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                        self.config.global.umu_path = Some(path);
+                        changed = true;
+                    }
+                }
+            });
+
             if changed {
                 let _ = self.config.save();
             }
