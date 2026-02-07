@@ -139,6 +139,7 @@ pub fn scan_egl_manifests() -> Vec<crate::models::InstalledGame> {
                                     version,
                                     install_size: 0, // Will be calculated on load
                                     download_size: 0,
+                                    platform: "Windows".to_string(),
                                 };
                                 installed.push(new_game);
                                 changed = true;
@@ -201,6 +202,7 @@ pub fn scan_and_import_games(library: &[crate::models::LibraryItem], search_path
                                     version: "0.0.0".to_string(), // Placeholder, might need better way to get version
                                     install_size: get_dir_size(&entry.path()),
                                     download_size: 0,
+                                    platform: "Windows".to_string(),
                                 };
                                 installed.push(new_game);
                                 changed = true;

@@ -21,7 +21,21 @@ pub struct GlobalSettings {
     #[serde(default)]
     pub eos_overlay_enabled: bool,
     #[serde(default)]
-    pub umu_path: Option<PathBuf>,
+    pub use_umu: bool,
+    #[serde(default = "default_store")]
+    pub umu_store: String,
+    #[serde(default)]
+    pub steam_compat_install_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_client_install_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_data_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_app_id: Option<String>,
+}
+
+fn default_store() -> String {
+    "egs".to_string()
 }
 
 impl Default for GlobalSettings {
@@ -32,7 +46,12 @@ impl Default for GlobalSettings {
             custom_pfx_path: None,
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
-            umu_path: None,
+            use_umu: false,
+            umu_store: default_store(),
+            steam_compat_install_path: None,
+            steam_compat_client_install_path: None,
+            steam_compat_data_path: None,
+            steam_compat_app_id: None,
         }
     }
 }
@@ -60,7 +79,17 @@ pub struct GameSettings {
     #[serde(default = "default_true")]
     pub eos_overlay_enabled: bool,
     #[serde(default)]
-    pub umu_path: Option<PathBuf>,
+    pub use_umu: bool,
+    #[serde(default)]
+    pub umu_store: Option<String>,
+    #[serde(default)]
+    pub steam_compat_install_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_client_install_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_data_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_app_id: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -82,7 +111,12 @@ impl Default for GameSettings {
             custom_pfx_path: None,
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
-            umu_path: None,
+            use_umu: false,
+            umu_store: None,
+            steam_compat_install_path: None,
+            steam_compat_client_install_path: None,
+            steam_compat_data_path: None,
+            steam_compat_app_id: None,
         }
     }
 }
