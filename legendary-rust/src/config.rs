@@ -36,6 +36,8 @@ pub struct GameSettings {
     pub custom_exe_path: Option<PathBuf>,
     #[serde(default = "default_true")]
     pub cloud_sync_enabled: bool,
+    #[serde(default)]
+    pub custom_pfx_path: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -53,6 +55,7 @@ impl Default for GameSettings {
             play_offline: false,
             custom_exe_path: None,
             cloud_sync_enabled: true,
+            custom_pfx_path: None,
         }
     }
 }

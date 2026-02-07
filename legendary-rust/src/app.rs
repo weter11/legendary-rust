@@ -432,8 +432,8 @@ impl LegendaryApp {
                                 if let Ok(assets) = client.get_game_assets("Windows") {
                                     if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                         if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                            if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
-                                                if let Ok(manifest_data) = client.download_manifest(url) {
+                                    if let Some(url) = EgsClient::get_manifest_url(&manifest_info) {
+                                        if let Ok(manifest_data) = client.download_manifest(&url) {
                                                     // Save manifest
                                                     if let Some(mut p) = crate::auth::get_config_dir() {
                                                         p.push("manifests");
@@ -637,8 +637,8 @@ impl LegendaryApp {
                         if let Ok(assets) = client.get_game_assets("Windows") {
                             if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                 if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                    if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
-                                        if let Ok(manifest_data) = client.download_manifest(url) {
+                                    if let Some(url) = EgsClient::get_manifest_url(&manifest_info) {
+                                        if let Ok(manifest_data) = client.download_manifest(&url) {
                                             if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
                                                 let mut tags = HashSet::new();
                                                 for file in manifest.files.values() {
@@ -720,8 +720,8 @@ impl LegendaryApp {
                         if let Ok(assets) = client.get_game_assets("Windows") {
                             if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                 if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                    if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
-                                        if let Ok(data) = client.download_manifest(url) {
+                                    if let Some(url) = EgsClient::get_manifest_url(&manifest_info) {
+                                        if let Ok(data) = client.download_manifest(&url) {
                                             // Save manifest
                                             if let Some(mut p) = crate::auth::get_config_dir() {
                                                 p.push("manifests");
@@ -1218,7 +1218,9 @@ impl LegendaryApp {
                                         }
                                         let mut command = std::process::Command::new(p);
                                         if is_proton {
-                                            if let Some(compat_path) = get_default_compat_data_path() {
+                                            let compat_path = game_settings.and_then(|s| s.custom_pfx_path.clone())
+                                                .or_else(|| get_default_compat_data_path());
+                                            if let Some(compat_path) = compat_path {
                                                 command.env("STEAM_COMPAT_DATA_PATH", &compat_path);
                                             }
                                             if let Some(home) = home::home_dir() {
@@ -1238,6 +1240,10 @@ impl LegendaryApp {
                             };
                             c.arg(exe_path);
 
+                            if let Some(pfx) = game_settings.and_then(|s| s.custom_pfx_path.as_ref()) {
+                                c.env("WINEPREFIX", pfx);
+                            }
+
                             // Epic arguments
                             c.arg("-AUTH_LOGIN=unused");
                             c.arg(format!("-AUTH_PASSWORD={}", token));
@@ -1256,6 +1262,12 @@ impl LegendaryApp {
                             c
                         } else {
                             let mut command = std::process::Command::new(exe_path);
+
+                            if let Some(settings) = self.config.games.get(&app_name) {
+                                if let Some(pfx) = &settings.custom_pfx_path {
+                                    command.env("WINEPREFIX", pfx);
+                                }
+                            }
 
                             // Epic arguments
                             command.arg("-AUTH_LOGIN=unused");
@@ -1537,6 +1549,22 @@ impl LegendaryApp {
                         }
                     });
 
+                    ui.add_space(10.0);
+                    ui.label("Custom WINE/Proton Prefix (PFX) Path (optional):");
+                    ui.horizontal(|ui| {
+                        let mut pfx_str = game_settings.custom_pfx_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                        if ui.text_edit_singleline(&mut pfx_str).changed() {
+                            game_settings.custom_pfx_path = if pfx_str.is_empty() { None } else { Some(std::path::PathBuf::from(pfx_str)) };
+                            changed = true;
+                        }
+                        if ui.button("Browse...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                game_settings.custom_pfx_path = Some(path);
+                                changed = true;
+                            }
+                        }
+                    });
+
                     if changed {
                         let _ = self.config.save();
                     }
@@ -1645,7 +1673,6 @@ impl LegendaryApp {
 
     fn show_install_dialog_view(&mut self, ui: &mut egui::Ui) {
         if let Some(info) = &self.install_info {
-            let app_name = info.app_name.clone();
             ui.heading(format!("Install {}", info.title));
             ui.add_space(10.0);
 

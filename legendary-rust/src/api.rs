@@ -142,6 +142,32 @@ impl EgsClient {
         Ok(response.bytes()?.to_vec())
     }
 
+    pub fn get_manifest_url(manifest_info: &serde_json::Value) -> Option<String> {
+        let manifest_node = &manifest_info["elements"][0]["manifests"][0];
+        let uri = manifest_node["uri"].as_str()?;
+        let mut url = uri.to_string();
+
+        if let Some(params) = manifest_node["queryParams"].as_array() {
+            let query = params.iter()
+                .filter_map(|p| {
+                    let name = p["name"].as_str()?;
+                    let value = p["value"].as_str()?;
+                    Some(format!("{}={}", name, value))
+                })
+                .collect::<Vec<_>>()
+                .join("&");
+            if !query.is_empty() {
+                if url.contains('?') {
+                    url.push('&');
+                } else {
+                    url.push('?');
+                }
+                url.push_str(&query);
+            }
+        }
+        Some(url)
+    }
+
     pub fn get_asset_manifest(&self, platform: &str, namespace: &str, catalog_item_id: &str, app_name: &str, label_name: &str) -> Result<serde_json::Value> {
         let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
         let url = format!("https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/v2/platform/{}/namespace/{}/catalogItem/{}/app/{}/label/{}",
