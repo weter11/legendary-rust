@@ -24,6 +24,14 @@ pub struct GlobalSettings {
     pub use_umu: bool,
     #[serde(default = "default_store")]
     pub umu_store: String,
+    #[serde(default)]
+    pub steam_compat_install_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_client_install_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_data_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_app_id: Option<String>,
 }
 
 fn default_store() -> String {
@@ -40,6 +48,10 @@ impl Default for GlobalSettings {
             eos_overlay_enabled: true,
             use_umu: false,
             umu_store: default_store(),
+            steam_compat_install_path: None,
+            steam_compat_client_install_path: None,
+            steam_compat_data_path: None,
+            steam_compat_app_id: None,
         }
     }
 }
@@ -70,6 +82,14 @@ pub struct GameSettings {
     pub use_umu: bool,
     #[serde(default)]
     pub umu_store: Option<String>,
+    #[serde(default)]
+    pub steam_compat_install_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_client_install_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_data_path: Option<PathBuf>,
+    #[serde(default)]
+    pub steam_compat_app_id: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -93,6 +113,10 @@ impl Default for GameSettings {
             eos_overlay_enabled: true,
             use_umu: false,
             umu_store: None,
+            steam_compat_install_path: None,
+            steam_compat_client_install_path: None,
+            steam_compat_data_path: None,
+            steam_compat_app_id: None,
         }
     }
 }

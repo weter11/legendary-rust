@@ -1147,9 +1147,24 @@ impl LegendaryApp {
                                         cmd.env("EOS_OVERLAY_KILLED", "1");
                                     }
 
+                                    // Steam Compatibility Environment Variables
+                                    if let Some(val) = game_settings.and_then(|s| s.steam_compat_install_path.as_ref()).or_else(|| config.global.steam_compat_install_path.as_ref()) {
+                                        cmd.env("STEAM_COMPAT_INSTALL_PATH", val);
+                                    }
+                                    if let Some(val) = game_settings.and_then(|s| s.steam_compat_client_install_path.as_ref()).or_else(|| config.global.steam_compat_client_install_path.as_ref()) {
+                                        cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", val);
+                                    }
+                                    if let Some(val) = game_settings.and_then(|s| s.steam_compat_data_path.as_ref()).or_else(|| config.global.steam_compat_data_path.as_ref()) {
+                                        cmd.env("STEAM_COMPAT_DATA_PATH", val);
+                                    }
+                                    if let Some(val) = game_settings.and_then(|s| s.steam_compat_app_id.as_ref()).or_else(|| config.global.steam_compat_app_id.as_ref()) {
+                                        cmd.env("STEAM_COMPAT_APP_ID", val);
+                                    }
+                                    cmd.env("APP_NAME", &app_name);
+
                                     // Log launch info to terminal
                                     println!("--- Launch Info ---");
-                                    let vars = ["GAMEID", "STORE", "STEAM_COMPAT_INSTALL_PATH", "LD_PRELOAD", "STEAM_COMPAT_CLIENT_INSTALL_PATH", "WINEPREFIX", "STEAM_COMPAT_DATA_PATH", "PROTONPATH"];
+                                    let vars = ["GAMEID", "STORE", "STEAM_COMPAT_INSTALL_PATH", "LD_PRELOAD", "STEAM_COMPAT_CLIENT_INSTALL_PATH", "WINEPREFIX", "STEAM_COMPAT_DATA_PATH", "PROTONPATH", "STEAM_COMPAT_APP_ID", "APP_NAME"];
                                     for var in vars {
                                         let val = cmd.get_envs().find(|(k, _)| k.to_str() == Some(var))
                                             .and_then(|(_, v)| v)
@@ -1883,6 +1898,42 @@ impl LegendaryApp {
                         });
                     }
 
+                    ui.add_space(10.0);
+                    ui.collapsing("Steam Compatibility Settings", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("STEAM_COMPAT_INSTALL_PATH:");
+                            let mut path_str = game_settings.steam_compat_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.text_edit_singleline(&mut path_str).changed() {
+                                game_settings.steam_compat_install_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                                changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("STEAM_COMPAT_CLIENT_INSTALL_PATH:");
+                            let mut path_str = game_settings.steam_compat_client_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.text_edit_singleline(&mut path_str).changed() {
+                                game_settings.steam_compat_client_install_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                                changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("STEAM_COMPAT_DATA_PATH:");
+                            let mut path_str = game_settings.steam_compat_data_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.text_edit_singleline(&mut path_str).changed() {
+                                game_settings.steam_compat_data_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                                changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("STEAM_COMPAT_APP_ID:");
+                            let mut id_str = game_settings.steam_compat_app_id.clone().unwrap_or_default();
+                            if ui.text_edit_singleline(&mut id_str).changed() {
+                                game_settings.steam_compat_app_id = if id_str.is_empty() { None } else { Some(id_str) };
+                                changed = true;
+                            }
+                        });
+                    });
+
                     if changed {
                         let _ = self.config.save();
                     }
@@ -2447,6 +2498,42 @@ impl LegendaryApp {
                     }
                 });
             }
+
+            ui.add_space(10.0);
+            ui.collapsing("Default Steam Compatibility Settings", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("STEAM_COMPAT_INSTALL_PATH:");
+                    let mut path_str = self.config.global.steam_compat_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                    if ui.text_edit_singleline(&mut path_str).changed() {
+                        self.config.global.steam_compat_install_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("STEAM_COMPAT_CLIENT_INSTALL_PATH:");
+                    let mut path_str = self.config.global.steam_compat_client_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                    if ui.text_edit_singleline(&mut path_str).changed() {
+                        self.config.global.steam_compat_client_install_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("STEAM_COMPAT_DATA_PATH:");
+                    let mut path_str = self.config.global.steam_compat_data_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                    if ui.text_edit_singleline(&mut path_str).changed() {
+                        self.config.global.steam_compat_data_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("STEAM_COMPAT_APP_ID:");
+                    let mut id_str = self.config.global.steam_compat_app_id.clone().unwrap_or_default();
+                    if ui.text_edit_singleline(&mut id_str).changed() {
+                        self.config.global.steam_compat_app_id = if id_str.is_empty() { None } else { Some(id_str) };
+                        changed = true;
+                    }
+                });
+            });
 
             if changed {
                 let _ = self.config.save();
