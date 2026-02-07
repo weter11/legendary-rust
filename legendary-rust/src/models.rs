@@ -146,3 +146,33 @@ pub struct CloudSaveFile {
     #[serde(rename = "lastModified")]
     pub last_modified: String,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Entitlement {
+    #[serde(rename = "entitlementId")]
+    pub entitlement_id: String,
+    #[serde(rename = "entitlementName")]
+    pub entitlement_name: String,
+    pub namespace: String,
+    #[serde(rename = "catalogItemId")]
+    pub catalog_item_id: String,
+    #[serde(rename = "accountId")]
+    pub account_id: String,
+    #[serde(rename = "identityId")]
+    pub identity_id: String,
+    #[serde(rename = "entitlementType")]
+    pub entitlement_type: String,
+    #[serde(rename = "grantDate")]
+    pub grant_date: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OwnershipTokenResponse {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DownloadTicket {
+    #[serde(rename = "manifestUrl")]
+    pub manifest_url: String,
+}

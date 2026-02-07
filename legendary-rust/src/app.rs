@@ -40,6 +40,7 @@ pub struct LegendaryApp {
     install_info: Option<crate::models::InstallInfo>,
     selected_tags: HashSet<String>,
     current_task: Option<TaskStatus>,
+    manifest_files: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -63,6 +64,7 @@ pub struct SaveSyncStatus {
 
 pub(crate) enum WorkerMsg {
     Login(String),
+    LoginSid(String),
     RefreshLibrary,
     FetchGameInfo(String, String), // namespace, catalog_item_id
     FetchAssets,
@@ -112,6 +114,10 @@ pub(crate) enum WorkerMsg {
     },
     EglSync,
     FetchGameToken(String),
+    ListFiles {
+        app_name: String,
+        catalog_item_id: String,
+    },
 }
 
 pub(crate) enum WorkerResponse {
@@ -146,6 +152,7 @@ pub(crate) enum WorkerResponse {
         app_name: String,
         token: String,
     },
+    FilesListed(Vec<String>),
 }
 
 #[derive(PartialEq)]
@@ -355,6 +362,21 @@ impl LegendaryApp {
                             Err(e) => { let _ = tx.send(WorkerResponse::Error(e.to_string())); }
                         }
                     }
+                    WorkerMsg::LoginSid(sid) => {
+                        let _ = tx.send(WorkerResponse::Error("Logging in with SID...".to_string()));
+                        match client.start_session_with_sid(&sid) {
+                            Ok(token) => {
+                                let _ = crate::auth::save_token(&token);
+                                let _ = tx.send(WorkerResponse::LoggedIn(token));
+                                // Fetch library immediately after login
+                                if let Ok(items) = client.get_library_items() {
+                                    let _ = tx.send(WorkerResponse::LibraryFetched(items));
+                                    ctx_clone.request_repaint();
+                                }
+                            }
+                            Err(e) => { let _ = tx.send(WorkerResponse::Error(e.to_string())); }
+                        }
+                    }
                     WorkerMsg::FetchImage { app_name, url, is_installed, image_type } => {
                         let cache_path = get_cache_path(&url);
                         let mut image_bytes = None;
@@ -427,11 +449,11 @@ impl LegendaryApp {
                         }
                     }
                     WorkerMsg::Logout => {
+                        let _ = client.invalidate_session();
                         let _ = crate::auth::get_config_dir().map(|d| {
                             let _ = std::fs::remove_file(d.join("user.json"));
                             let _ = std::fs::remove_file(d.join("token.json"));
                         });
-                        // Clear client token too if needed
                     }
                     WorkerMsg::VerifyGame { app_name, catalog_item_id } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Verifying {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
@@ -849,6 +871,41 @@ impl LegendaryApp {
                         }
                         ctx_clone.request_repaint();
                     }
+                    WorkerMsg::ListFiles { app_name, catalog_item_id } => {
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Listing files for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
+
+                        let manifest_path_opt = crate::auth::get_manifest_path(&app_name, &catalog_item_id);
+                        let mut manifest_opt = None;
+
+                        if let Some(manifest_path) = manifest_path_opt {
+                            if let Ok(data) = std::fs::read(&manifest_path) {
+                                manifest_opt = crate::manifest::parse_manifest(&data).ok();
+                            }
+                        }
+
+                        if manifest_opt.is_none() {
+                             if let Ok(assets) = client.get_game_assets("Windows") {
+                                if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                    if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
+                                        if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                            if let Ok(manifest_data) = client.download_manifest(&url) {
+                                                manifest_opt = crate::manifest::parse_manifest(&manifest_data).ok();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(manifest) = manifest_opt {
+                            let files = manifest.list_files();
+                            let _ = tx.send(WorkerResponse::FilesListed(files));
+                            let _ = tx.send(WorkerResponse::TaskFinished(format!("Listed files for {}", app_name)));
+                        } else {
+                            let _ = tx.send(WorkerResponse::Error(format!("Could not find manifest for {}", app_name)));
+                        }
+                        ctx_clone.request_repaint();
+                    }
                 }
             }
         });
@@ -876,6 +933,7 @@ impl LegendaryApp {
             install_info: None,
             selected_tags: HashSet::new(),
             current_task: None,
+            manifest_files: Vec::new(),
         }
     }
 }
@@ -969,6 +1027,9 @@ impl eframe::App for LegendaryApp {
                 }
                 WorkerResponse::GameTokenFetched { app_name, token } => {
                     self.launch_game_with_token(app_name, token);
+                }
+                WorkerResponse::FilesListed(files) => {
+                    self.manifest_files = files;
                 }
             }
         }
@@ -1084,27 +1145,54 @@ impl LegendaryApp {
         ui.label(&self.status_message);
 
         ui.separator();
-        ui.label("How to log in:");
-        ui.label("1. Click the button below to open the Epic Games login page in your browser.");
-        ui.label("2. After logging in, you will see a JSON response containing 'authorizationCode'.");
-        ui.label("3. Copy that code and paste it into the field below.");
-        ui.label("4. Click 'Log In' to complete the process.");
 
-        if ui.button("Open Login URL").clicked() {
-            let url = crate::api::EgsClient::get_auth_url();
-            let _ = open::that(url);
-            self.status_message = "Waiting for authorization code...".to_string();
-        }
+        ui.collapsing("Login with Authorization Code", |ui| {
+            ui.label("How to log in:");
+            ui.label("1. Click the button below to open the Epic Games login page in your browser.");
+            ui.label("2. After logging in, you will see a JSON response containing 'authorizationCode'.");
+            ui.label("3. Copy that code and paste it into the field below.");
+            ui.label("4. Click 'Log In' to complete the process.");
 
-        ui.horizontal(|ui| {
-            ui.label("Authorization Code:");
-            ui.text_edit_singleline(&mut self.auth_code);
+            if ui.button("Open Login URL").clicked() {
+                let url = crate::api::EgsClient::get_auth_url();
+                let _ = open::that(url);
+                self.status_message = "Waiting for authorization code...".to_string();
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Authorization Code:");
+                ui.text_edit_singleline(&mut self.auth_code);
+            });
+
+            if ui.button("Log In").clicked() {
+                let _ = self.tx.send(WorkerMsg::Login(self.auth_code.clone()));
+                self.status_message = "Logging in...".to_string();
+            }
         });
 
-        if ui.button("Log In").clicked() {
-            let _ = self.tx.send(WorkerMsg::Login(self.auth_code.clone()));
-            self.status_message = "Logging in...".to_string();
-        }
+        ui.add_space(10.0);
+
+        ui.collapsing("Login with SID", |ui| {
+            ui.label("1. Click the button below to open the Epic Games SID page.");
+            ui.label("2. You must be already logged in to Epic Games in your browser.");
+            ui.label("3. You will see a JSON response containing 'sid'.");
+            ui.label("4. Copy that SID and paste it into the field below.");
+
+            if ui.button("Open SID URL").clicked() {
+                let _ = open::that("https://www.epicgames.com/id/api/sid");
+                self.status_message = "Waiting for SID...".to_string();
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("SID:");
+                ui.text_edit_singleline(&mut self.auth_code);
+            });
+
+            if ui.button("Log In with SID").clicked() {
+                let _ = self.tx.send(WorkerMsg::LoginSid(self.auth_code.clone()));
+                self.status_message = "Logging in with SID...".to_string();
+            }
+        });
     }
 
     fn show_library_view(&mut self, ui: &mut egui::Ui) {
@@ -1214,6 +1302,39 @@ impl LegendaryApp {
             let mut found = false;
 
             let game_settings = self.config.games.get(&app_name);
+
+            // Pre-launch command
+            let pre_launch = if let Some(gs) = game_settings {
+                if !gs.pre_launch_command.is_empty() { Some(&gs.pre_launch_command) }
+                else if !self.config.global.pre_launch_command.is_empty() { Some(&self.config.global.pre_launch_command) }
+                else { None }
+            } else if !self.config.global.pre_launch_command.is_empty() {
+                Some(&self.config.global.pre_launch_command)
+            } else {
+                None
+            };
+
+            if let Some(cmd_str) = pre_launch {
+                self.status_message = format!("Running pre-launch command: {}", cmd_str);
+                let mut parts = cmd_str.split_whitespace();
+                if let Some(program) = parts.next() {
+                    let mut child = std::process::Command::new(program);
+                    for arg in parts {
+                        child.arg(arg);
+                    }
+                    match child.spawn().and_then(|mut c| c.wait()) {
+                        Ok(status) => {
+                            if !status.success() {
+                                self.status_message = format!("Pre-launch command failed with status: {}", status);
+                            }
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Failed to run pre-launch command: {}", e);
+                        }
+                    }
+                }
+            }
+
             let custom_exe = game_settings.and_then(|s| s.custom_exe_path.clone());
 
             let mut possible_exes = Vec::new();
@@ -1330,6 +1451,16 @@ impl LegendaryApp {
                             c.arg(format!("-epicapp={}", app_name));
                             c.arg("-epicenv=Prod");
 
+                            let overlay_enabled = if let Some(gs) = game_settings {
+                                gs.eos_overlay_enabled
+                            } else {
+                                self.config.global.eos_overlay_enabled
+                            };
+
+                            if !overlay_enabled {
+                                c.env("EOS_OVERLAY_KILLED", "1");
+                            }
+
                             if let Some(settings) = game_settings {
                                 if settings.play_offline {
                                     c.arg("-offline");
@@ -1348,6 +1479,16 @@ impl LegendaryApp {
                             command.arg("-AUTH_TYPE=exchangecode");
                             command.arg(format!("-epicapp={}", app_name));
                             command.arg("-epicenv=Prod");
+
+                            let overlay_enabled = if let Some(gs) = self.config.games.get(&app_name) {
+                                gs.eos_overlay_enabled
+                            } else {
+                                self.config.global.eos_overlay_enabled
+                            };
+
+                            if !overlay_enabled {
+                                command.env("EOS_OVERLAY_KILLED", "1");
+                            }
 
                             if let Some(settings) = self.config.games.get(&app_name) {
                                 if settings.play_offline {
@@ -1644,8 +1785,38 @@ impl LegendaryApp {
                         }
                     });
 
+                    ui.add_space(10.0);
+                    ui.label("Pre-launch Command:");
+                    if ui.text_edit_singleline(&mut game_settings.pre_launch_command).changed() {
+                        changed = true;
+                    }
+
+                    if ui.checkbox(&mut game_settings.eos_overlay_enabled, "Enable EOS Overlay").changed() {
+                        changed = true;
+                    }
+
                     if changed {
                         let _ = self.config.save();
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.collapsing("Manifest Files", |ui| {
+                    if ui.button("Fetch/Refresh File List").clicked() {
+                        let catalog_item_id = self.library.iter().find(|i| i.app_name == app_name)
+                            .map(|i| i.catalog_item_id.clone())
+                            .unwrap_or_default();
+                        let _ = self.tx.send(WorkerMsg::ListFiles {
+                            app_name: app_name.clone(),
+                            catalog_item_id,
+                        });
+                    }
+                    if !self.manifest_files.is_empty() {
+                        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                            for file in &self.manifest_files {
+                                ui.label(file);
+                            }
+                        });
                     }
                 });
 
@@ -2081,6 +2252,15 @@ impl LegendaryApp {
                     }
                 });
             }
+            ui.add_space(10.0);
+            ui.label("Global Pre-launch Command:");
+            if ui.text_edit_singleline(&mut self.config.global.pre_launch_command).changed() {
+                changed = true;
+            }
+            if ui.checkbox(&mut self.config.global.eos_overlay_enabled, "Enable EOS Overlay by default").changed() {
+                changed = true;
+            }
+
             if changed {
                 let _ = self.config.save();
             }

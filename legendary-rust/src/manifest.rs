@@ -9,6 +9,14 @@ pub struct Manifest {
     pub files: HashMap<String, FileManifest>,
 }
 
+impl Manifest {
+    pub fn list_files(&self) -> Vec<String> {
+        let mut files: Vec<String> = self.files.keys().cloned().collect();
+        files.sort();
+        files
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChunkInfo {
     pub guid: [u32; 4],

@@ -221,4 +221,96 @@ impl EgsClient {
 
         Ok(())
     }
+
+    pub fn invalidate_session(&mut self) -> Result<()> {
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let url = format!("https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/sessions/kill/{}", token);
+
+        let response = self.client.delete(&url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to invalidate session: {}", response.status()));
+        }
+
+        self.access_token = None;
+        Ok(())
+    }
+
+    pub fn get_ownership_token(&self, namespace: &str, catalog_item_id: &str) -> Result<String> {
+        let url = format!("https://ecommerce-public-service-ecomprod02.ol.epicgames.com/ecommerce/api/public/namespaces/{}/items/{}/ownership/token", namespace, catalog_item_id);
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+
+        let response = self.client.get(&url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to get ownership token: {}", response.status()));
+        }
+
+        let json: OwnershipTokenResponse = response.json()?;
+        Ok(json.token)
+    }
+
+    pub fn get_launcher_manifests(&self) -> Result<serde_json::Value> {
+        let url = "https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/v2/platform/Windows/launcher";
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+
+        let response = self.client.get(url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to get launcher manifests: {}", response.status()));
+        }
+
+        let json: serde_json::Value = response.json()?;
+        Ok(json)
+    }
+
+    pub fn get_user_entitlements(&self) -> Result<Vec<Entitlement>> {
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let url = "https://entitlement-public-service-prod08.ol.epicgames.com/entitlement/api/public/entitlements";
+
+        let response = self.client.get(url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to get entitlements: {}", response.status()));
+        }
+
+        let entitlements: Vec<Entitlement> = response.json()?;
+        Ok(entitlements)
+    }
+
+    pub fn get_download_ticket(&self, namespace: &str, catalog_item_id: &str, app_name: &str) -> Result<DownloadTicket> {
+        let url = format!("https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/v2/platform/Windows/namespace/{}/catalogItem/{}/app/{}/downloadTicket", namespace, catalog_item_id, app_name);
+        let token = self.access_token.as_ref().ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+
+        let response = self.client.get(&url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to get download ticket: {}", response.status()));
+        }
+
+        let ticket: DownloadTicket = response.json()?;
+        Ok(ticket)
+    }
+
+    pub fn get_game_manifest_by_ticket(&self, manifest_url: &str) -> Result<Vec<u8>> {
+        self.download_manifest(manifest_url)
+    }
+
+    pub fn start_session_with_sid(&mut self, sid: &str) -> Result<OAuthToken> {
+        self.do_auth(&[
+            ("grant_type", "sid"),
+            ("sid", sid),
+            ("token_type", "eg1"),
+        ])
+    }
 }
