@@ -140,6 +140,7 @@ pub fn scan_egl_manifests() -> Vec<crate::models::InstalledGame> {
                                     install_size: 0, // Will be calculated on load
                                     download_size: 0,
                                     platform: "Windows".to_string(),
+                                    manifest_path: None,
                                 };
                                 installed.push(new_game);
                                 changed = true;
@@ -195,6 +196,8 @@ pub fn scan_and_import_games(library: &[crate::models::LibraryItem], search_path
                                     .map(|m| m.app_title.clone())
                                     .unwrap_or_else(|| item.app_name.clone());
 
+                                let manifest_path = get_manifest_path(&item.app_name, &item.catalog_item_id)
+                                    .map(|p| p.to_string_lossy().to_string());
                                 let new_game = crate::models::InstalledGame {
                                     app_name: item.app_name.clone(),
                                     install_path: entry.path().to_string_lossy().to_string(),
@@ -203,6 +206,7 @@ pub fn scan_and_import_games(library: &[crate::models::LibraryItem], search_path
                                     install_size: get_dir_size(&entry.path()),
                                     download_size: 0,
                                     platform: "Windows".to_string(),
+                                    manifest_path,
                                 };
                                 installed.push(new_game);
                                 changed = true;
@@ -239,16 +243,26 @@ pub fn get_manifest_path(app_name: &str, catalog_item_id: &str) -> Option<PathBu
     let mut p = get_config_dir()?;
     p.push("manifests");
 
-    // Try app_name.manifest
-    let p1 = p.join(format!("{}.manifest", app_name));
-    if p1.exists() {
-        return Some(p1);
-    }
+    if !p.exists() { return None; }
 
-    // Try catalog_item_id.manifest
+    // Try exact matches first
+    let p1 = p.join(format!("{}.manifest", app_name));
+    if p1.exists() { return Some(p1); }
     let p2 = p.join(format!("{}.manifest", catalog_item_id));
-    if p2.exists() {
-        return Some(p2);
+    if p2.exists() { return Some(p2); }
+
+    // Scan for prefixed manifests (e.g. app_name_Windows_label.manifest)
+    if let Ok(entries) = std::fs::read_dir(&p) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
+                    if filename.ends_with(".manifest") && (filename.starts_with(app_name) || filename.starts_with(catalog_item_id)) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
     }
 
     None

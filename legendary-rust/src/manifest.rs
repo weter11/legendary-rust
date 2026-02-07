@@ -7,6 +7,8 @@ pub struct Manifest {
     pub manifest_version: u32,
     pub chunks: HashMap<[u32; 4], ChunkInfo>,
     pub files: HashMap<String, FileManifest>,
+    pub total_uncompressed_size: u64,
+    pub total_download_size: u64,
 }
 
 impl Manifest {
@@ -220,7 +222,10 @@ pub fn parse_manifest(data: &[u8]) -> anyhow::Result<Manifest> {
         files.insert(name.clone(), FileManifest { filename: name, hash, chunk_parts: parts, file_size, install_tags: tags });
     }
 
-    Ok(Manifest { manifest_version, chunks, files })
+    let total_uncompressed_size = files.values().map(|f| f.file_size).sum();
+    let total_download_size = chunks.values().map(|c| c.file_size as u64).sum();
+
+    Ok(Manifest { manifest_version, chunks, files, total_uncompressed_size, total_download_size })
 }
 
 fn read_fstring<R: Read>(mut reader: R) -> anyhow::Result<String> {

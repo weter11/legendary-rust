@@ -7,6 +7,7 @@ pub struct EgsClient {
     user_basic: String,
     pw_basic: String,
     token_info: Option<OAuthToken>,
+    save_token_path: Option<std::path::PathBuf>,
 }
 
 impl EgsClient {
@@ -27,6 +28,7 @@ impl EgsClient {
             user_basic,
             pw_basic,
             token_info: None,
+            save_token_path: None,
         })
     }
 
@@ -70,6 +72,13 @@ impl EgsClient {
 
         let token: OAuthToken = response.json()?;
         self.token_info = Some(token.clone());
+
+        if let Some(path) = &self.save_token_path {
+            if let Ok(json) = serde_json::to_string(&token) {
+                let _ = std::fs::write(path, json);
+            }
+        }
+
         Ok(token)
     }
 
@@ -114,6 +123,10 @@ impl EgsClient {
 
     pub fn set_token(&mut self, token: &OAuthToken) {
         self.token_info = Some(token.clone());
+    }
+
+    pub fn set_save_token_path(&mut self, path: std::path::PathBuf) {
+        self.save_token_path = Some(path);
     }
 
     pub fn get_library_items(&mut self) -> Result<Vec<LibraryItem>> {
