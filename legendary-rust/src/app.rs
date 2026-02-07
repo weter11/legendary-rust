@@ -47,6 +47,8 @@ pub struct TaskStatus {
     pub name: String,
     pub progress: f32,
     pub is_paused: bool,
+    pub speed: String,
+    pub eta: String,
 }
 
 #[derive(Clone)]
@@ -127,6 +129,8 @@ pub(crate) enum WorkerResponse {
         task_name: String,
         progress: f32,
         is_paused: bool,
+        speed: Option<String>,
+        eta: Option<String>,
     },
     TaskFinished(String),
     SaveSyncStatusFetched {
@@ -222,6 +226,26 @@ fn format_duration(dur: chrono::Duration) -> String {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     } else {
         format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
+    }
+}
+
+fn construct_manifest_url(manifest_node: &serde_json::Value) -> Option<String> {
+    let uri = manifest_node["uri"].as_str()?;
+    if let Some(params) = manifest_node["queryParams"].as_array() {
+        if params.is_empty() {
+            return Some(uri.to_string());
+        }
+        let mut url = uri.to_string();
+        url.push('?');
+        for (i, param) in params.iter().enumerate() {
+            if i > 0 { url.push('&'); }
+            let name = param["name"].as_str().unwrap_or("");
+            let value = param["value"].as_str().unwrap_or("");
+            url.push_str(&format!("{}={}", urlencoding::encode(name), urlencoding::encode(value)));
+        }
+        Some(url)
+    } else {
+        Some(uri.to_string())
     }
 }
 
@@ -410,7 +434,7 @@ impl LegendaryApp {
                         // Clear client token too if needed
                     }
                     WorkerMsg::VerifyGame { app_name, catalog_item_id } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Verifying {}", app_name), progress: 0.0, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Verifying {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                         let installed = crate::auth::load_installed_games();
                         let game = installed.iter().find(|g| g.app_name == app_name);
 
@@ -420,7 +444,7 @@ impl LegendaryApp {
                             let mut manifest_opt = None;
 
                             if let Some(manifest_path) = manifest_path_opt {
-                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Reading manifest at {:?}", manifest_path), progress: 0.0, is_paused: false });
+                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Reading manifest at {:?}", manifest_path), progress: 0.0, is_paused: false, speed: None, eta: None });
                                 if let Ok(data) = std::fs::read(&manifest_path) {
                                     manifest_opt = crate::manifest::parse_manifest(&data).ok();
                                 }
@@ -428,12 +452,12 @@ impl LegendaryApp {
 
                             if manifest_opt.is_none() {
                                 // Try to download manifest
-                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Manifest not found, fetching for {}", app_name), progress: 0.0, is_paused: false });
+                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Manifest not found, fetching for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                                 if let Ok(assets) = client.get_game_assets("Windows") {
                                     if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                         if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                            if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
-                                                if let Ok(manifest_data) = client.download_manifest(url) {
+                                            if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                                if let Ok(manifest_data) = client.download_manifest(&url) {
                                                     // Save manifest
                                                     if let Some(mut p) = crate::auth::get_config_dir() {
                                                         p.push("manifests");
@@ -486,7 +510,9 @@ impl LegendaryApp {
                                         let _ = tx.send(WorkerResponse::TaskProgress {
                                             task_name: format!("Verifying: {}", filename),
                                             progress,
-                                            is_paused: pause.load(Ordering::SeqCst)
+                                            is_paused: pause.load(Ordering::SeqCst),
+                                            speed: None,
+                                            eta: None,
                                         });
                                     }
                                 }
@@ -501,7 +527,7 @@ impl LegendaryApp {
                     }
                     WorkerMsg::RepairGame(app_name, update) => {
                         let task_name = if update { format!("Repairing and Updating {}", app_name) } else { format!("Repairing {}", app_name) };
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: task_name.clone(), progress: 0.0, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: task_name.clone(), progress: 0.0, is_paused: false, speed: None, eta: None });
                         // Placeholder for repair logic
                         for i in 1..=10 {
                             if check_status() {
@@ -509,13 +535,13 @@ impl LegendaryApp {
                                 break;
                             }
                             std::thread::sleep(std::time::Duration::from_millis(300));
-                            let _ = tx.send(WorkerResponse::TaskProgress { task_name: task_name.clone(), progress: i as f32 / 10.0, is_paused: pause.load(Ordering::SeqCst) });
+                            let _ = tx.send(WorkerResponse::TaskProgress { task_name: task_name.clone(), progress: i as f32 / 10.0, is_paused: pause.load(Ordering::SeqCst), speed: None, eta: None });
                         }
                         let _ = tx.send(WorkerResponse::TaskFinished(format!("Task '{}' complete", task_name)));
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::SyncCloudSaves { app_name, namespace, save_path } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Checking cloud saves for {}", app_name), progress: 0.0, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Checking cloud saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                         let local_time = save_path.as_ref().and_then(|p| get_latest_local_save_time(p));
 
                         if let Some(token) = crate::auth::load_token().ok() {
@@ -561,7 +587,7 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::UploadCloudSave { app_name, namespace, save_path } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: 0.0, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                         if let Ok(token) = crate::auth::load_token() {
                             let files = get_all_files(&save_path);
                             let total = files.len();
@@ -579,7 +605,7 @@ impl LegendaryApp {
                                         }
                                     }
                                 }
-                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false });
+                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false, speed: None, eta: None });
                             }
                             if success {
                                 let _ = tx.send(WorkerResponse::TaskFinished(format!("Upload for {} complete. {} files uploaded.", app_name, total)));
@@ -590,7 +616,7 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::DownloadCloudSave { app_name, namespace, save_path } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Downloading saves for {}", app_name), progress: 0.0, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Downloading saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                         if let Ok(token) = crate::auth::load_token() {
                             match client.get_cloud_save_metadata(&namespace, &token.account_id, &app_name) {
                                 Ok(files) => {
@@ -615,7 +641,7 @@ impl LegendaryApp {
                                                 break;
                                             }
                                         }
-                                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Downloading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false });
+                                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Downloading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false, speed: None, eta: None });
                                     }
                                     if success {
                                         let _ = tx.send(WorkerResponse::TaskFinished(format!("Download for {} complete. {} files downloaded.", app_name, total)));
@@ -631,14 +657,14 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::FetchInstallInfo { app_name, title } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Fetching install info for {}", app_name), progress: 0.0, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Fetching install info for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
 
                         let mut available_tags = Vec::new();
                         if let Ok(assets) = client.get_game_assets("Windows") {
                             if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                 if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                    if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
-                                        if let Ok(manifest_data) = client.download_manifest(url) {
+                                    if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                        if let Ok(manifest_data) = client.download_manifest(&url) {
                                             if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
                                                 let mut tags = HashSet::new();
                                                 for file in manifest.files.values() {
@@ -703,7 +729,7 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::InstallGame { app_name, install_path, selected_tags } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Preparing installation for {}", app_name), progress: 0.0, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Preparing installation for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
 
                         // Actual implementation: Create directory
                         if let Err(e) = std::fs::create_dir_all(&install_path) {
@@ -712,7 +738,7 @@ impl LegendaryApp {
                         }
 
                         // Try to get manifest URL
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Fetching manifest for {}", app_name), progress: 0.05, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Fetching manifest for {}", app_name), progress: 0.05, is_paused: false, speed: None, eta: None });
 
                         let mut manifest_data_opt = None;
                         let mut base_url_opt = None;
@@ -720,8 +746,8 @@ impl LegendaryApp {
                         if let Ok(assets) = client.get_game_assets("Windows") {
                             if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                 if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                    if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
-                                        if let Ok(data) = client.download_manifest(url) {
+                                    if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                        if let Ok(data) = client.download_manifest(&url) {
                                             // Save manifest
                                             if let Some(mut p) = crate::auth::get_config_dir() {
                                                 p.push("manifests");
@@ -730,7 +756,7 @@ impl LegendaryApp {
                                                 let _ = std::fs::write(&manifest_path, &data);
                                             }
                                             manifest_data_opt = Some(data);
-                                            base_url_opt = Some(url.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| url.to_string()));
+                                            base_url_opt = Some(url.split('?').next().unwrap_or(&url).rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| url.to_string()));
                                         }
                                     }
                                 }
@@ -778,13 +804,13 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::UninstallGame(app_name) => {
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uninstalling {}", app_name), progress: 0.0, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uninstalling {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
 
                         let mut installed = crate::auth::load_installed_games();
                         if let Some(game) = installed.iter().find(|g| g.app_name == app_name).cloned() {
                             let path = std::path::Path::new(&game.install_path);
                             if path.exists() {
-                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Deleting files for {}", app_name), progress: 0.5, is_paused: false });
+                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Deleting files for {}", app_name), progress: 0.5, is_paused: false, speed: None, eta: None });
                                 if let Err(e) = std::fs::remove_dir_all(path) {
                                     let _ = tx.send(WorkerResponse::Error(format!("Failed to delete game files: {}", e)));
                                 }
@@ -799,14 +825,14 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::ScanGames { library, search_paths } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: "Scanning for games...".to_string(), progress: 0.0, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: "Scanning for games...".to_string(), progress: 0.0, is_paused: false, speed: None, eta: None });
                         let installed = crate::auth::scan_and_import_games(&library, &search_paths);
                         let _ = tx.send(WorkerResponse::GamesScanned(installed));
                         let _ = tx.send(WorkerResponse::TaskFinished("Scan complete".to_string()));
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::EglSync => {
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: "Syncing with EGL...".to_string(), progress: 0.0, is_paused: false });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: "Syncing with EGL...".to_string(), progress: 0.0, is_paused: false, speed: None, eta: None });
                         let installed = crate::auth::scan_egl_manifests();
                         let _ = tx.send(WorkerResponse::GamesScanned(installed));
                         let _ = tx.send(WorkerResponse::TaskFinished("EGL Sync complete".to_string()));
@@ -890,17 +916,19 @@ impl eframe::App for LegendaryApp {
                     self.status_message = format!("Error: {}", e);
                     self.current_task = None;
                 }
-                WorkerResponse::TaskProgress { task_name, progress, is_paused } => {
+                WorkerResponse::TaskProgress { task_name, progress, is_paused, speed, eta } => {
                     self.current_task = Some(TaskStatus {
                         name: task_name.clone(),
                         progress,
                         is_paused,
+                        speed: speed.clone().unwrap_or_default(),
+                        eta: eta.clone().unwrap_or_default(),
                     });
-                    if is_paused {
-                        self.status_message = format!("{}: {:.0}% (Paused)", task_name, progress * 100.0);
-                    } else {
-                        self.status_message = format!("{}: {:.0}%", task_name, progress * 100.0);
-                    }
+                    let mut msg = format!("{}: {:.0}%", task_name, progress * 100.0);
+                    if let Some(s) = speed { msg.push_str(&format!(" | {}", s)); }
+                    if let Some(e) = eta { msg.push_str(&format!(" | ETA: {}", e)); }
+                    if is_paused { msg.push_str(" (Paused)"); }
+                    self.status_message = msg;
                 }
                 WorkerResponse::TaskFinished(msg) => {
                     self.status_message = msg;
@@ -1018,6 +1046,14 @@ impl LegendaryApp {
             ui.group(|ui| {
                 ui.label(format!("Active Task: {}", task.name));
                 ui.add(egui::ProgressBar::new(task.progress).show_percentage());
+                ui.horizontal(|ui| {
+                    if !task.speed.is_empty() {
+                        ui.label(format!("Speed: {}", task.speed));
+                    }
+                    if !task.eta.is_empty() {
+                        ui.label(format!("ETA: {}", task.eta));
+                    }
+                });
                 ui.horizontal(|ui| {
                     if task.is_paused {
                         if ui.button("Resume").clicked() {
@@ -1218,23 +1254,72 @@ impl LegendaryApp {
                                         }
                                         let mut command = std::process::Command::new(p);
                                         if is_proton {
-                                            if let Some(compat_path) = get_default_compat_data_path() {
-                                                command.env("STEAM_COMPAT_DATA_PATH", &compat_path);
+                                            let pfx_path = if let Some(gs) = game_settings {
+                                                if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
+                                                else { get_default_compat_data_path() }
+                                            } else if self.config.global.use_custom_pfx {
+                                                self.config.global.custom_pfx_path.clone()
+                                            } else {
+                                                get_default_compat_data_path()
+                                            };
+
+                                            if let Some(path) = pfx_path {
+                                                command.env("STEAM_COMPAT_DATA_PATH", path);
                                             }
                                             if let Some(home) = home::home_dir() {
                                                 command.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", home.join(".local/share/Steam"));
                                             }
                                             command.arg("run");
+                                        } else {
+                                            // Custom/System Wine
+                                            let pfx_path = if let Some(gs) = game_settings {
+                                                if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
+                                                else { None }
+                                            } else if self.config.global.use_custom_pfx {
+                                                self.config.global.custom_pfx_path.clone()
+                                            } else {
+                                                None
+                                            };
+                                            if let Some(path) = pfx_path {
+                                                command.env("WINEPREFIX", path);
+                                            }
                                         }
                                         command
                                     } else {
-                                        std::process::Command::new("wine")
+                                        let mut command = std::process::Command::new("wine");
+                                        let pfx_path = if let Some(gs) = game_settings {
+                                            if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                            else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
+                                            else { None }
+                                        } else if self.config.global.use_custom_pfx {
+                                            self.config.global.custom_pfx_path.clone()
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(path) = pfx_path {
+                                            command.env("WINEPREFIX", path);
+                                        }
+                                        command
                                     }
                                 }
-                                Some(CompatibilityTool::SystemWine) => {
-                                    std::process::Command::new("wine")
+                                Some(CompatibilityTool::SystemWine) | None => {
+                                    let mut command = std::process::Command::new("wine");
+                                    let pfx_path = if let Some(gs) = game_settings {
+                                        if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                        else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
+                                        else { None }
+                                    } else if self.config.global.use_custom_pfx {
+                                        self.config.global.custom_pfx_path.clone()
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(path) = pfx_path {
+                                        command.env("WINEPREFIX", path);
+                                    }
+                                    command
                                 }
-                                None => std::process::Command::new("wine"),
                             };
                             c.arg(exe_path);
 
@@ -1429,6 +1514,28 @@ impl LegendaryApp {
                         ui.label("Compatibility Tool:");
                         let mut changed = false;
                         let game_settings = self.config.games.entry(app_name.clone()).or_default();
+
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut game_settings.use_custom_pfx, "Custom PFX").changed() {
+                                changed = true;
+                            }
+                            if game_settings.use_custom_pfx {
+                                let mut path_str = game_settings.custom_pfx_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                                if ui.text_edit_singleline(&mut path_str).changed() {
+                                    game_settings.custom_pfx_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                                    changed = true;
+                                }
+                                if ui.button("Browse...").clicked() {
+                                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                        game_settings.custom_pfx_path = Some(path);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.separator();
+
                         ui.horizontal(|ui| {
                             if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::SteamProton), "Steam Proton").changed() { changed = true; }
                             if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::CustomProtonWine), "Custom Proton/Wine").changed() { changed = true; }
@@ -1951,6 +2058,34 @@ impl LegendaryApp {
         if ui.button("Sync with Epic Games Launcher").clicked() {
             let _ = self.tx.send(WorkerMsg::EglSync);
         }
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.label("Default Compatibility Settings:");
+            let mut changed = false;
+            if ui.checkbox(&mut self.config.global.use_custom_pfx, "Use Custom WINE/Proton Prefix (PFX)").changed() {
+                changed = true;
+            }
+            if self.config.global.use_custom_pfx {
+                ui.horizontal(|ui| {
+                    let mut path_str = self.config.global.custom_pfx_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                    if ui.text_edit_singleline(&mut path_str).changed() {
+                        self.config.global.custom_pfx_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                        changed = true;
+                    }
+                    if ui.button("Browse...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.config.global.custom_pfx_path = Some(path);
+                            changed = true;
+                        }
+                    }
+                });
+            }
+            if changed {
+                let _ = self.config.save();
+            }
+        });
+
         ui.add_space(10.0);
 
         ui.label("Game Library Paths:");
