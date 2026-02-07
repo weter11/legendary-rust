@@ -826,6 +826,7 @@ impl LegendaryApp {
                         match client.get_game_assets(&platform) {
                             Ok(assets) => {
                                 if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                    version = asset.build_version.clone();
                                     match client.get_asset_manifest(&platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                         Ok(manifest_info) => {
                                             if let Some(url) = find_manifest_url(&manifest_info) {
@@ -861,7 +862,6 @@ impl LegendaryApp {
                         let mut success = false;
                         if let (Some(manifest_data), Some(base_url)) = (manifest_data_opt, base_url_opt) {
                             if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
-                                version = manifest.version_string.clone();
                                 install_size = manifest.total_uncompressed_size;
                                 download_size = manifest.total_download_size;
                                 let downloader = crate::download::Downloader::new(base_url, tx.clone(), cancel.clone(), pause.clone());
