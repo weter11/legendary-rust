@@ -225,6 +225,26 @@ fn format_duration(dur: chrono::Duration) -> String {
     }
 }
 
+fn construct_manifest_url(manifest_node: &serde_json::Value) -> Option<String> {
+    let uri = manifest_node["uri"].as_str()?;
+    if let Some(params) = manifest_node["queryParams"].as_array() {
+        if params.is_empty() {
+            return Some(uri.to_string());
+        }
+        let mut url = uri.to_string();
+        url.push('?');
+        for (i, param) in params.iter().enumerate() {
+            if i > 0 { url.push('&'); }
+            let name = param["name"].as_str().unwrap_or("");
+            let value = param["value"].as_str().unwrap_or("");
+            url.push_str(&format!("{}={}", name, value));
+        }
+        Some(url)
+    } else {
+        Some(uri.to_string())
+    }
+}
+
 fn get_cache_path(url: &str) -> Option<std::path::PathBuf> {
     let mut p = crate::auth::get_config_dir()?;
     p.push("cache");
@@ -432,8 +452,8 @@ impl LegendaryApp {
                                 if let Ok(assets) = client.get_game_assets("Windows") {
                                     if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                         if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                            if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
-                                                if let Ok(manifest_data) = client.download_manifest(url) {
+                                            if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                                if let Ok(manifest_data) = client.download_manifest(&url) {
                                                     // Save manifest
                                                     if let Some(mut p) = crate::auth::get_config_dir() {
                                                         p.push("manifests");
@@ -637,8 +657,8 @@ impl LegendaryApp {
                         if let Ok(assets) = client.get_game_assets("Windows") {
                             if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                 if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                    if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
-                                        if let Ok(manifest_data) = client.download_manifest(url) {
+                                    if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                        if let Ok(manifest_data) = client.download_manifest(&url) {
                                             if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
                                                 let mut tags = HashSet::new();
                                                 for file in manifest.files.values() {
@@ -720,8 +740,8 @@ impl LegendaryApp {
                         if let Ok(assets) = client.get_game_assets("Windows") {
                             if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                 if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                    if let Some(url) = manifest_info["elements"][0]["manifests"][0]["uri"].as_str() {
-                                        if let Ok(data) = client.download_manifest(url) {
+                                    if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                        if let Ok(data) = client.download_manifest(&url) {
                                             // Save manifest
                                             if let Some(mut p) = crate::auth::get_config_dir() {
                                                 p.push("manifests");
@@ -730,7 +750,7 @@ impl LegendaryApp {
                                                 let _ = std::fs::write(&manifest_path, &data);
                                             }
                                             manifest_data_opt = Some(data);
-                                            base_url_opt = Some(url.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| url.to_string()));
+                                            base_url_opt = Some(url.split('?').next().unwrap_or(&url).rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| url.to_string()));
                                         }
                                     }
                                 }
@@ -1218,23 +1238,72 @@ impl LegendaryApp {
                                         }
                                         let mut command = std::process::Command::new(p);
                                         if is_proton {
-                                            if let Some(compat_path) = get_default_compat_data_path() {
-                                                command.env("STEAM_COMPAT_DATA_PATH", &compat_path);
+                                            let pfx_path = if let Some(gs) = game_settings {
+                                                if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
+                                                else { get_default_compat_data_path() }
+                                            } else if self.config.global.use_custom_pfx {
+                                                self.config.global.custom_pfx_path.clone()
+                                            } else {
+                                                get_default_compat_data_path()
+                                            };
+
+                                            if let Some(path) = pfx_path {
+                                                command.env("STEAM_COMPAT_DATA_PATH", path);
                                             }
                                             if let Some(home) = home::home_dir() {
                                                 command.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", home.join(".local/share/Steam"));
                                             }
                                             command.arg("run");
+                                        } else {
+                                            // Custom/System Wine
+                                            let pfx_path = if let Some(gs) = game_settings {
+                                                if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
+                                                else { None }
+                                            } else if self.config.global.use_custom_pfx {
+                                                self.config.global.custom_pfx_path.clone()
+                                            } else {
+                                                None
+                                            };
+                                            if let Some(path) = pfx_path {
+                                                command.env("WINEPREFIX", path);
+                                            }
                                         }
                                         command
                                     } else {
-                                        std::process::Command::new("wine")
+                                        let mut command = std::process::Command::new("wine");
+                                        let pfx_path = if let Some(gs) = game_settings {
+                                            if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                            else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
+                                            else { None }
+                                        } else if self.config.global.use_custom_pfx {
+                                            self.config.global.custom_pfx_path.clone()
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(path) = pfx_path {
+                                            command.env("WINEPREFIX", path);
+                                        }
+                                        command
                                     }
                                 }
-                                Some(CompatibilityTool::SystemWine) => {
-                                    std::process::Command::new("wine")
+                                Some(CompatibilityTool::SystemWine) | None => {
+                                    let mut command = std::process::Command::new("wine");
+                                    let pfx_path = if let Some(gs) = game_settings {
+                                        if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                        else if self.config.global.use_custom_pfx { self.config.global.custom_pfx_path.clone() }
+                                        else { None }
+                                    } else if self.config.global.use_custom_pfx {
+                                        self.config.global.custom_pfx_path.clone()
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(path) = pfx_path {
+                                        command.env("WINEPREFIX", path);
+                                    }
+                                    command
                                 }
-                                None => std::process::Command::new("wine"),
                             };
                             c.arg(exe_path);
 
@@ -1429,6 +1498,28 @@ impl LegendaryApp {
                         ui.label("Compatibility Tool:");
                         let mut changed = false;
                         let game_settings = self.config.games.entry(app_name.clone()).or_default();
+
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut game_settings.use_custom_pfx, "Custom PFX").changed() {
+                                changed = true;
+                            }
+                            if game_settings.use_custom_pfx {
+                                let mut path_str = game_settings.custom_pfx_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                                if ui.text_edit_singleline(&mut path_str).changed() {
+                                    game_settings.custom_pfx_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                                    changed = true;
+                                }
+                                if ui.button("Browse...").clicked() {
+                                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                        game_settings.custom_pfx_path = Some(path);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.separator();
+
                         ui.horizontal(|ui| {
                             if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::SteamProton), "Steam Proton").changed() { changed = true; }
                             if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::CustomProtonWine), "Custom Proton/Wine").changed() { changed = true; }
@@ -1951,6 +2042,34 @@ impl LegendaryApp {
         if ui.button("Sync with Epic Games Launcher").clicked() {
             let _ = self.tx.send(WorkerMsg::EglSync);
         }
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.label("Default Compatibility Settings:");
+            let mut changed = false;
+            if ui.checkbox(&mut self.config.global.use_custom_pfx, "Use Custom WINE/Proton Prefix (PFX)").changed() {
+                changed = true;
+            }
+            if self.config.global.use_custom_pfx {
+                ui.horizontal(|ui| {
+                    let mut path_str = self.config.global.custom_pfx_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                    if ui.text_edit_singleline(&mut path_str).changed() {
+                        self.config.global.custom_pfx_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                        changed = true;
+                    }
+                    if ui.button("Browse...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.config.global.custom_pfx_path = Some(path);
+                            changed = true;
+                        }
+                    }
+                });
+            }
+            if changed {
+                let _ = self.config.save();
+            }
+        });
+
         ui.add_space(10.0);
 
         ui.label("Game Library Paths:");

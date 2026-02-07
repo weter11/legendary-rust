@@ -12,12 +12,18 @@ pub struct AppConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GlobalSettings {
     pub game_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub use_custom_pfx: bool,
+    #[serde(default)]
+    pub custom_pfx_path: Option<PathBuf>,
 }
 
 impl Default for GlobalSettings {
     fn default() -> Self {
         Self {
             game_paths: Vec::new(),
+            use_custom_pfx: false,
+            custom_pfx_path: None,
         }
     }
 }
@@ -36,6 +42,10 @@ pub struct GameSettings {
     pub custom_exe_path: Option<PathBuf>,
     #[serde(default = "default_true")]
     pub cloud_sync_enabled: bool,
+    #[serde(default)]
+    pub use_custom_pfx: bool,
+    #[serde(default)]
+    pub custom_pfx_path: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -53,6 +63,8 @@ impl Default for GameSettings {
             play_offline: false,
             custom_exe_path: None,
             cloud_sync_enabled: true,
+            use_custom_pfx: false,
+            custom_pfx_path: None,
         }
     }
 }
