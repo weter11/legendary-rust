@@ -481,7 +481,7 @@ impl LegendaryApp {
                         let game_idx = installed.iter().position(|g| g.app_name == app_name);
 
                         if let Some(idx) = game_idx {
-                            let game = &installed[idx];
+                            let game = installed[idx].clone();
                             let mut manifest_opt = None;
                             let mut manifest_path_opt = game.manifest_path.as_ref().map(std::path::PathBuf::from);
 
