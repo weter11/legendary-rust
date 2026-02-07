@@ -21,7 +21,7 @@ pub struct GlobalSettings {
     #[serde(default)]
     pub eos_overlay_enabled: bool,
     #[serde(default)]
-    pub umu_path: Option<PathBuf>,
+    pub use_umu: bool,
 }
 
 impl Default for GlobalSettings {
@@ -32,7 +32,7 @@ impl Default for GlobalSettings {
             custom_pfx_path: None,
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
-            umu_path: None,
+            use_umu: false,
         }
     }
 }
@@ -52,8 +52,6 @@ pub struct GameSettings {
     #[serde(default = "default_true")]
     pub cloud_sync_enabled: bool,
     #[serde(default)]
-    pub alias: Option<String>,
-    #[serde(default)]
     pub use_custom_pfx: bool,
     #[serde(default)]
     pub custom_pfx_path: Option<PathBuf>,
@@ -62,7 +60,7 @@ pub struct GameSettings {
     #[serde(default = "default_true")]
     pub eos_overlay_enabled: bool,
     #[serde(default)]
-    pub umu_path: Option<PathBuf>,
+    pub use_umu: bool,
 }
 
 fn default_true() -> bool {
@@ -80,12 +78,11 @@ impl Default for GameSettings {
             play_offline: false,
             custom_exe_path: None,
             cloud_sync_enabled: true,
-            alias: None,
             use_custom_pfx: false,
             custom_pfx_path: None,
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
-            umu_path: None,
+            use_umu: false,
         }
     }
 }

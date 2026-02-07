@@ -999,10 +999,32 @@ impl LegendaryApp {
 
                             'search: for exe_path in possible_exes {
                                 if exe_path.exists() {
-                                    let umu_path = game_settings.and_then(|s| s.umu_path.clone()).or_else(|| config.global.umu_path.clone());
+                                    let use_umu = game_settings.map(|s| s.use_umu).unwrap_or(config.global.use_umu);
 
-                                    let mut cmd = if let Some(umu) = umu_path {
-                                        let mut c = std::process::Command::new(umu);
+                                    let mut cmd = if use_umu && std::env::consts::OS == "linux" {
+                                        let mut c = std::process::Command::new("/usr/bin/umu-run");
+                                        c.env("STORE", "egs");
+                                        c.env("GAMEID", format!("umu-{}", app_name));
+
+                                        let pfx_path = if let Some(gs) = game_settings {
+                                            if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                            else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
+                                            else { get_default_compat_data_path() }
+                                        } else if config.global.use_custom_pfx {
+                                            config.global.custom_pfx_path.clone()
+                                        } else {
+                                            get_default_compat_data_path()
+                                        };
+
+                                        if let Some(path) = pfx_path {
+                                            c.env("WINEPREFIX", path);
+                                        }
+
+                                        if let Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) = game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
+                                            if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
+                                                c.env("PROTONPATH", path);
+                                            }
+                                        }
                                         c.arg(exe_path);
                                         c
                                     } else if std::env::consts::OS == "linux" {
@@ -1466,16 +1488,13 @@ impl LegendaryApp {
             ui.vertical(|ui| {
                 for item in &self.library {
                     let local_meta = crate::auth::load_local_metadata(&item.app_name);
-                    let alias = self.config.games.get(&item.app_name).and_then(|s| s.alias.clone());
-                    let title = alias.unwrap_or_else(|| {
-                        local_meta.as_ref()
-                            .map(|m| m.app_title.clone())
-                            .or_else(|| item.metadata.as_ref()
-                                .and_then(|m| m.get("title"))
-                                .and_then(|t| t.as_str())
-                                .map(|s| s.to_string()))
-                            .unwrap_or_else(|| item.app_name.clone())
-                    });
+                    let title = local_meta.as_ref()
+                        .map(|m| m.app_title.clone())
+                        .or_else(|| item.metadata.as_ref()
+                            .and_then(|m| m.get("title"))
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string()))
+                        .unwrap_or_else(|| item.app_name.clone());
 
                     if !self.search_query.is_empty() && !title.to_lowercase().contains(&self.search_query.to_lowercase()) && !item.app_name.to_lowercase().contains(&self.search_query.to_lowercase()) {
                         continue;
@@ -1783,13 +1802,6 @@ impl LegendaryApp {
                     let mut changed = false;
                     let game_settings = self.config.games.entry(app_name.clone()).or_default();
 
-                    ui.label("Alias:");
-                    let mut alias_str = game_settings.alias.clone().unwrap_or_default();
-                    if ui.text_edit_singleline(&mut alias_str).changed() {
-                        game_settings.alias = if alias_str.is_empty() { None } else { Some(alias_str) };
-                        changed = true;
-                    }
-
                     ui.label("Additional Parameters:");
                     if ui.text_edit_singleline(&mut game_settings.start_params).changed() {
                         changed = true;
@@ -1826,20 +1838,9 @@ impl LegendaryApp {
                     }
 
                     ui.add_space(10.0);
-                    ui.label("UMU Launcher Path (optional):");
-                    ui.horizontal(|ui| {
-                        let mut umu_str = game_settings.umu_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                        if ui.text_edit_singleline(&mut umu_str).changed() {
-                            game_settings.umu_path = if umu_str.is_empty() { None } else { Some(std::path::PathBuf::from(umu_str)) };
-                            changed = true;
-                        }
-                        if ui.button("Browse...").clicked() {
-                            if let Some(path) = rfd::FileDialog::new().pick_file() {
-                                game_settings.umu_path = Some(path);
-                                changed = true;
-                            }
-                        }
-                    });
+                    if ui.checkbox(&mut game_settings.use_umu, "Use UMU Launcher").changed() {
+                        changed = true;
+                    }
 
                     if changed {
                         let _ = self.config.save();
@@ -2393,20 +2394,9 @@ impl LegendaryApp {
             }
 
             ui.add_space(10.0);
-            ui.label("Global UMU Launcher Path:");
-            ui.horizontal(|ui| {
-                let mut umu_str = self.config.global.umu_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                if ui.text_edit_singleline(&mut umu_str).changed() {
-                    self.config.global.umu_path = if umu_str.is_empty() { None } else { Some(std::path::PathBuf::from(umu_str)) };
-                    changed = true;
-                }
-                if ui.button("Browse...").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        self.config.global.umu_path = Some(path);
-                        changed = true;
-                    }
-                }
-            });
+            if ui.checkbox(&mut self.config.global.use_umu, "Use UMU Launcher by default").changed() {
+                changed = true;
+            }
 
             if changed {
                 let _ = self.config.save();
