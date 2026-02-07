@@ -140,6 +140,7 @@ pub fn scan_egl_manifests() -> Vec<crate::models::InstalledGame> {
                                     install_size: 0, // Will be calculated on load
                                     download_size: 0,
                                     platform: "Windows".to_string(),
+                                    manifest_path: None,
                                 };
                                 installed.push(new_game);
                                 changed = true;
@@ -195,6 +196,8 @@ pub fn scan_and_import_games(library: &[crate::models::LibraryItem], search_path
                                     .map(|m| m.app_title.clone())
                                     .unwrap_or_else(|| item.app_name.clone());
 
+                                let manifest_path = get_manifest_path(&item.app_name, &item.catalog_item_id)
+                                    .map(|p| p.to_string_lossy().to_string());
                                 let new_game = crate::models::InstalledGame {
                                     app_name: item.app_name.clone(),
                                     install_path: entry.path().to_string_lossy().to_string(),
@@ -203,6 +206,7 @@ pub fn scan_and_import_games(library: &[crate::models::LibraryItem], search_path
                                     install_size: get_dir_size(&entry.path()),
                                     download_size: 0,
                                     platform: "Windows".to_string(),
+                                    manifest_path,
                                 };
                                 installed.push(new_game);
                                 changed = true;

@@ -88,6 +88,8 @@ pub struct InstalledGame {
     pub download_size: u64,
     #[serde(default = "default_platform")]
     pub platform: String,
+    #[serde(default)]
+    pub manifest_path: Option<String>,
 }
 
 fn default_platform() -> String {

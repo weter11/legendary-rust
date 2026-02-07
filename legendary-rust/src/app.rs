@@ -249,6 +249,20 @@ fn construct_manifest_url(manifest_node: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn find_manifest_url(asset_manifest: &serde_json::Value) -> Option<String> {
+    let elements = asset_manifest["elements"].as_array()?;
+    for element in elements {
+        if let Some(manifests) = element["manifests"].as_array() {
+            for manifest in manifests {
+                if let Some(url) = construct_manifest_url(manifest) {
+                    return Some(url);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn get_cache_path(url: &str) -> Option<std::path::PathBuf> {
     let mut p = crate::auth::get_config_dir()?;
     p.push("cache");
@@ -297,7 +311,12 @@ impl LegendaryApp {
             };
 
             let mut client = match EgsClient::new() {
-                Ok(c) => c,
+                Ok(mut c) => {
+                    if let Some(config_dir) = crate::auth::get_config_dir() {
+                        c.set_save_token_path(config_dir.join("user.json"));
+                    }
+                    c
+                }
                 Err(e) => {
                     let _ = tx.send(WorkerResponse::Error(format!("Failed to initialize client: {}", e)));
                     return;
@@ -458,13 +477,17 @@ impl LegendaryApp {
                     }
                     WorkerMsg::VerifyGame { app_name, catalog_item_id } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Verifying {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
-                        let installed = crate::auth::load_installed_games();
-                        let game = installed.iter().find(|g| g.app_name == app_name);
+                        let mut installed = crate::auth::load_installed_games();
+                        let game_idx = installed.iter().position(|g| g.app_name == app_name);
 
-                        let manifest_path_opt = crate::auth::get_manifest_path(&app_name, &catalog_item_id);
-
-                        if let Some(game) = game {
+                        if let Some(idx) = game_idx {
+                            let game = &installed[idx];
                             let mut manifest_opt = None;
+                            let mut manifest_path_opt = game.manifest_path.as_ref().map(std::path::PathBuf::from);
+
+                            if manifest_path_opt.as_ref().map(|p| !p.exists()).unwrap_or(true) {
+                                manifest_path_opt = crate::auth::get_manifest_path(&app_name, &catalog_item_id);
+                            }
 
                             if let Some(manifest_path) = manifest_path_opt {
                                 let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Reading manifest at {:?}", manifest_path), progress: 0.0, is_paused: false, speed: None, eta: None });
@@ -487,16 +510,24 @@ impl LegendaryApp {
                                         if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                             match client.get_asset_manifest(&game.platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                                 Ok(manifest_info) => {
-                                                    if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                                    if let Some(url) = find_manifest_url(&manifest_info) {
                                                         match client.download_manifest(&url) {
                                                             Ok(manifest_data) => {
                                                                 // Save manifest
+                                                                let mut manifest_path_saved = None;
                                                                 if let Some(mut p) = crate::auth::get_config_dir() {
                                                                     p.push("manifests");
                                                                     let _ = std::fs::create_dir_all(&p);
                                                                     let manifest_path = p.join(format!("{}.manifest", app_name));
-                                                                    let _ = std::fs::write(&manifest_path, &manifest_data);
+                                                                    if std::fs::write(&manifest_path, &manifest_data).is_ok() {
+                                                                        manifest_path_saved = Some(manifest_path.to_string_lossy().to_string());
+                                                                    }
                                                                 }
+                                                                if let Some(mps) = manifest_path_saved {
+                                                                    installed[idx].manifest_path = Some(mps);
+                                                                    let _ = crate::auth::save_installed_games(&installed);
+                                                                }
+
                                                                 match crate::manifest::parse_manifest(&manifest_data) {
                                                                     Ok(m) => manifest_opt = Some(m),
                                                                     Err(e) => log::error!("Failed to parse downloaded manifest for {}: {}", app_name, e),
@@ -787,13 +818,17 @@ impl LegendaryApp {
 
                         let mut manifest_data_opt = None;
                         let mut base_url_opt = None;
+                        let mut manifest_path_saved = None;
+                        let mut version = "1.0.0".to_string();
+                        let mut install_size = 0u64;
+                        let mut download_size = 0u64;
 
                         match client.get_game_assets(&platform) {
                             Ok(assets) => {
                                 if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                     match client.get_asset_manifest(&platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                         Ok(manifest_info) => {
-                                            if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
+                                            if let Some(url) = find_manifest_url(&manifest_info) {
                                                 match client.download_manifest(&url) {
                                                     Ok(data) => {
                                                         // Save manifest
@@ -801,7 +836,9 @@ impl LegendaryApp {
                                                             p.push("manifests");
                                                             let _ = std::fs::create_dir_all(&p);
                                                             let manifest_path = p.join(format!("{}.manifest", app_name));
-                                                            let _ = std::fs::write(&manifest_path, &data);
+                                                            if std::fs::write(&manifest_path, &data).is_ok() {
+                                                                manifest_path_saved = Some(manifest_path.to_string_lossy().to_string());
+                                                            }
                                                         }
                                                         manifest_data_opt = Some(data);
                                                         base_url_opt = Some(url.split('?').next().unwrap_or(&url).rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| url.to_string()));
@@ -824,6 +861,9 @@ impl LegendaryApp {
                         let mut success = false;
                         if let (Some(manifest_data), Some(base_url)) = (manifest_data_opt, base_url_opt) {
                             if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
+                                version = manifest.version_string.clone();
+                                install_size = manifest.total_uncompressed_size;
+                                download_size = manifest.total_download_size;
                                 let downloader = crate::download::Downloader::new(base_url, tx.clone(), cancel.clone(), pause.clone());
                                 match downloader.download_game(&manifest, &install_path, selected_tags) {
                                     Ok(_) => success = true,
@@ -849,10 +889,11 @@ impl LegendaryApp {
                                 app_name: app_name.clone(),
                                 install_path: install_path.to_string_lossy().to_string(),
                                 title: title.clone(),
-                                version: "1.0.0".to_string(),
-                                install_size: 10 * 1024 * 1024, // 10MB simulated
-                                download_size: 5 * 1024 * 1024,
+                                version,
+                                install_size,
+                                download_size,
                                 platform: platform.clone(),
+                                manifest_path: manifest_path_saved,
                             });
                             let _ = crate::auth::save_installed_games(&installed);
 
