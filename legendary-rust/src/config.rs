@@ -20,6 +20,8 @@ pub struct GlobalSettings {
     pub pre_launch_command: String,
     #[serde(default)]
     pub eos_overlay_enabled: bool,
+    #[serde(default)]
+    pub umu_path: Option<PathBuf>,
 }
 
 impl Default for GlobalSettings {
@@ -30,6 +32,7 @@ impl Default for GlobalSettings {
             custom_pfx_path: None,
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
+            umu_path: None,
         }
     }
 }
@@ -56,6 +59,8 @@ pub struct GameSettings {
     pub pre_launch_command: String,
     #[serde(default = "default_true")]
     pub eos_overlay_enabled: bool,
+    #[serde(default)]
+    pub umu_path: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -77,6 +82,7 @@ impl Default for GameSettings {
             custom_pfx_path: None,
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
+            umu_path: None,
         }
     }
 }

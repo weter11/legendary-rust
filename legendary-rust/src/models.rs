@@ -86,6 +86,12 @@ pub struct InstalledGame {
     pub install_size: u64,
     #[serde(default)]
     pub download_size: u64,
+    #[serde(default = "default_platform")]
+    pub platform: String,
+}
+
+fn default_platform() -> String {
+    "Windows".to_string()
 }
 
 #[derive(Debug, Clone)]
