@@ -3,6 +3,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::fs::File;
 
 pub const EOS_OVERLAY_APP_ID: &str = "98bc04bc842e4906993fd6d6644ffb8d";
+pub const EOS_OVERLAY_NAMESPACE: &str = "302e5ede476149b1bc3e4fe6ae45e50e";
+pub const EOS_OVERLAY_CATALOG_ID: &str = "cc15684f44d849e89e9bf4cec0508b68";
 
 pub const EOS_OVERLAY_KEY: &str = r"SOFTWARE\Epic Games\EOS";
 pub const EOS_OVERLAY_VALUE: &str = "OverlayPath";

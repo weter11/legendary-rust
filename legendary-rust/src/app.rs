@@ -746,21 +746,30 @@ impl LegendaryApp {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Fetching install info for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
 
                         let mut available_tags = Vec::new();
-                        if let Ok(assets) = client.get_game_assets("Windows") {
-                            if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
-                                if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                    if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
-                                        if let Ok(manifest_data) = client.download_manifest(&url, Some(app_name.as_str())) {
-                                            if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
-                                                let mut tags = HashSet::new();
-                                                for file in manifest.files.values() {
-                                                    for tag in &file.install_tags {
-                                                        tags.insert(tag.clone());
-                                                    }
+
+                        let asset_info = if app_name == crate::eos::EOS_OVERLAY_APP_ID {
+                            Some(("Windows".to_string(), crate::eos::EOS_OVERLAY_NAMESPACE.to_string(), crate::eos::EOS_OVERLAY_CATALOG_ID.to_string(), app_name.clone(), "Live".to_string()))
+                        } else {
+                            if let Ok(assets) = client.get_game_assets("Windows") {
+                                assets.iter().find(|a| a.app_name == app_name).map(|asset| {
+                                    ("Windows".to_string(), asset.namespace.clone(), asset.catalog_item_id.clone(), asset.app_name.clone(), asset.label_name.clone())
+                                })
+                            } else { None }
+                        };
+
+                        if let Some((plat, namespace, catalog_id, app, label)) = asset_info {
+                            if let Ok(manifest_info) = client.get_asset_manifest(&plat, &namespace, &catalog_id, &app, &label) {
+                                if let Some(url) = find_manifest_url(&manifest_info) {
+                                    if let Ok(manifest_data) = client.download_manifest(&url, Some(app_name.as_str())) {
+                                        if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
+                                            let mut tags = HashSet::new();
+                                            for file in manifest.files.values() {
+                                                for tag in &file.install_tags {
+                                                    tags.insert(tag.clone());
                                                 }
-                                                available_tags = tags.into_iter().collect();
-                                                available_tags.sort();
                                             }
+                                            available_tags = tags.into_iter().collect();
+                                            available_tags.sort();
                                         }
                                     }
                                 }
@@ -833,40 +842,51 @@ impl LegendaryApp {
                         let mut install_size = 0u64;
                         let mut download_size = 0u64;
 
-                        match client.get_game_assets(&platform) {
-                            Ok(assets) => {
-                                if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
-                                    version = asset.build_version.clone();
-                                    match client.get_asset_manifest(&platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                        Ok(manifest_info) => {
-                                            if let Some(url) = find_manifest_url(&manifest_info) {
-                                                match client.download_manifest(&url, Some(app_name.as_str())) {
-                                                    Ok(data) => {
-                                                        // Save manifest
-                                                        if let Some(mut p) = crate::auth::get_config_dir() {
-                                                            p.push("manifests");
-                                                            let _ = std::fs::create_dir_all(&p);
-                                                            let manifest_path = p.join(format!("{}.manifest", app_name));
-                                                            if std::fs::write(&manifest_path, &data).is_ok() {
-                                                                manifest_path_saved = Some(manifest_path.to_string_lossy().to_string());
-                                                            }
-                                                        }
-                                                        manifest_data_opt = Some(data);
-                                                        base_url_opt = Some(url.split('?').next().unwrap_or(&url).rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| url.to_string()));
-                                                    }
-                                                    Err(e) => log::error!("Failed to download manifest for {}: {}", app_name, e),
-                                                }
-                                            } else {
-                                                log::error!("Manifest URL not found in asset manifest for {}", app_name);
-                                            }
-                                        }
-                                        Err(e) => log::error!("Failed to fetch asset manifest for {}: {}", app_name, e),
-                                    }
-                                } else {
-                                    log::error!("Asset not found for {} on platform {}", app_name, platform);
+                        let asset_info = if app_name == crate::eos::EOS_OVERLAY_APP_ID {
+                            Some(("Windows".to_string(), crate::eos::EOS_OVERLAY_NAMESPACE.to_string(), crate::eos::EOS_OVERLAY_CATALOG_ID.to_string(), app_name.clone(), "Live".to_string()))
+                        } else {
+                            match client.get_game_assets(&platform) {
+                                Ok(assets) => {
+                                    assets.iter().find(|a| a.app_name == app_name).map(|asset| {
+                                        version = asset.build_version.clone();
+                                        (platform.clone(), asset.namespace.clone(), asset.catalog_item_id.clone(), asset.app_name.clone(), asset.label_name.clone())
+                                    })
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to fetch assets for platform {}: {}", platform, e);
+                                    None
                                 }
                             }
-                            Err(e) => log::error!("Failed to fetch assets for platform {}: {}", platform, e),
+                        };
+
+                        if let Some((plat, namespace, catalog_id, app, label)) = asset_info {
+                            match client.get_asset_manifest(&plat, &namespace, &catalog_id, &app, &label) {
+                                Ok(manifest_info) => {
+                                    if let Some(url) = find_manifest_url(&manifest_info) {
+                                        match client.download_manifest(&url, Some(app_name.as_str())) {
+                                            Ok(data) => {
+                                                // Save manifest
+                                                if let Some(mut p) = crate::auth::get_config_dir() {
+                                                    p.push("manifests");
+                                                    let _ = std::fs::create_dir_all(&p);
+                                                    let manifest_path = p.join(format!("{}.manifest", app_name));
+                                                    if std::fs::write(&manifest_path, &data).is_ok() {
+                                                        manifest_path_saved = Some(manifest_path.to_string_lossy().to_string());
+                                                    }
+                                                }
+                                                manifest_data_opt = Some(data);
+                                                base_url_opt = Some(url.split('?').next().unwrap_or(&url).rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| url.to_string()));
+                                            }
+                                            Err(e) => log::error!("Failed to download manifest for {}: {}", app_name, e),
+                                        }
+                                    } else {
+                                        log::error!("Manifest URL not found in asset manifest for {}", app_name);
+                                    }
+                                }
+                                Err(e) => log::error!("Failed to fetch asset manifest for {}: {}", app_name, e),
+                            }
+                        } else if app_name != crate::eos::EOS_OVERLAY_APP_ID {
+                            log::error!("Asset not found for {} on platform {}", app_name, platform);
                         }
 
                         let mut success = false;
@@ -973,20 +993,30 @@ impl LegendaryApp {
                         }
 
                         if manifest_opt.is_none() {
-                             // Try common platforms if not found
-                             for platform in &["Windows", "Mac", "Linux"] {
-                                if let Ok(assets) = client.get_game_assets(platform) {
-                                    if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
-                                        if let Ok(manifest_info) = client.get_asset_manifest(platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
-                                            if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
-                                                if let Ok(manifest_data) = client.download_manifest(&url, Some(app_name.as_str())) {
-                                                    manifest_opt = crate::manifest::parse_manifest(&manifest_data).ok();
-                                                    if manifest_opt.is_some() { break; }
+                             if app_name == crate::eos::EOS_OVERLAY_APP_ID {
+                                 if let Ok(manifest_info) = client.get_asset_manifest("Windows", crate::eos::EOS_OVERLAY_NAMESPACE, crate::eos::EOS_OVERLAY_CATALOG_ID, &app_name, "Live") {
+                                     if let Some(url) = find_manifest_url(&manifest_info) {
+                                         if let Ok(manifest_data) = client.download_manifest(&url, Some(app_name.as_str())) {
+                                             manifest_opt = crate::manifest::parse_manifest(&manifest_data).ok();
+                                         }
+                                     }
+                                 }
+                             } else {
+                                 // Try common platforms if not found
+                                 for platform in &["Windows", "Mac", "Linux"] {
+                                    if let Ok(assets) = client.get_game_assets(platform) {
+                                        if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                            if let Ok(manifest_info) = client.get_asset_manifest(platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
+                                                if let Some(url) = find_manifest_url(&manifest_info) {
+                                                    if let Ok(manifest_data) = client.download_manifest(&url, Some(app_name.as_str())) {
+                                                        manifest_opt = crate::manifest::parse_manifest(&manifest_data).ok();
+                                                        if manifest_opt.is_some() { break; }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                }
+                                 }
                              }
                         }
 
