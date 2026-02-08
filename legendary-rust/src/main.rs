@@ -6,6 +6,7 @@ mod config;
 mod models;
 mod manifest;
 mod download;
+mod eos;
 #[cfg(test)]
 mod tests;
 
