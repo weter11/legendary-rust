@@ -97,6 +97,16 @@ pub fn load_local_metadata(app_name: &str) -> Option<crate::models::LocalGameMet
     None
 }
 
+pub fn save_local_metadata(app_name: &str, metadata: &crate::models::LocalGameMetadata) -> anyhow::Result<()> {
+    let mut path = get_config_dir().ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
+    path.push("metadata");
+    std::fs::create_dir_all(&path)?;
+    let metadata_file = path.join(format!("{}.json", app_name));
+    let json = serde_json::to_string_pretty(metadata)?;
+    std::fs::write(metadata_file, json)?;
+    Ok(())
+}
+
 pub fn scan_egl_manifests() -> Vec<crate::models::InstalledGame> {
     let mut installed = load_installed_games();
     let mut changed = false;

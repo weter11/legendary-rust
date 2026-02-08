@@ -66,6 +66,8 @@ pub struct GameInfo {
     #[serde(rename = "keyImages")]
     pub key_images: Vec<KeyImage>,
     pub namespace: String,
+    #[serde(rename = "customAttributes")]
+    pub custom_attributes: Option<std::collections::HashMap<String, CustomAttribute>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -122,6 +124,8 @@ pub struct LocalMetadataDetails {
     pub id: String,
     #[serde(default)]
     pub namespace: String,
+    #[serde(default)]
+    pub deployment_id: Option<String>,
     pub developer: Option<String>,
     #[serde(rename = "keyImages", default)]
     pub key_images: Vec<KeyImage>,

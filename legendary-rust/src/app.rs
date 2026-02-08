@@ -68,7 +68,11 @@ pub(crate) enum WorkerMsg {
     Login(String),
     LoginSid(String),
     RefreshLibrary,
-    FetchGameInfo(String, String), // namespace, catalog_item_id
+    FetchGameInfo {
+        app_name: String,
+        namespace: String,
+        catalog_item_id: String,
+    },
     FetchAssets,
     FetchImage {
         app_name: String,
@@ -268,6 +272,16 @@ fn find_manifest_url(asset_manifest: &serde_json::Value) -> Option<String> {
     None
 }
 
+fn extract_deployment_id(manifest_info: &serde_json::Value) -> Option<String> {
+    manifest_info["elements"].as_array()?
+        .get(0)?
+        .get("sidecar")?
+        .get("config")?
+        .as_str()
+        .and_then(|config_str| serde_json::from_str::<serde_json::Value>(config_str).ok())
+        .and_then(|config_json| config_json["deploymentId"].as_str().map(|s| s.to_string()))
+}
+
 fn get_cache_path(url: &str) -> Option<std::path::PathBuf> {
     let mut p = crate::auth::get_config_dir()?;
     p.push("cache");
@@ -460,9 +474,26 @@ impl LegendaryApp {
                             Err(e) => { let _ = tx.send(WorkerResponse::Error(e.to_string())); }
                         }
                     }
-                    WorkerMsg::FetchGameInfo(ns, id) => {
-                        match client.get_game_info(&ns, &id) {
+                    WorkerMsg::FetchGameInfo { app_name, namespace, catalog_item_id } => {
+                        match client.get_game_info(&namespace, &catalog_item_id) {
                             Ok(info) => {
+                                // Save metadata
+                                let meta = crate::models::LocalGameMetadata {
+                                    app_name: app_name.clone(),
+                                    app_title: info.title.clone(),
+                                    metadata: crate::models::LocalMetadataDetails {
+                                        id: info.id.clone(),
+                                        namespace: info.namespace.clone(),
+                                        deployment_id: None, // Will be filled by FetchInstallInfo/Verify
+                                        developer: None, // Not available in GameInfo
+                                        key_images: info.key_images.clone(),
+                                        dlc_item_list: None,
+                                        custom_attributes: info.custom_attributes.clone(),
+                                        release_info: None,
+                                    }
+                                };
+                                let _ = crate::auth::save_local_metadata(&app_name, &meta);
+
                                 let _ = tx.send(WorkerResponse::GameInfoFetched(info));
                                 ctx_clone.request_repaint();
                             }
@@ -520,6 +551,14 @@ impl LegendaryApp {
                                         if let Some(asset) = assets.iter().find(|a| a.app_name == app_name || a.catalog_item_id == catalog_item_id) {
                                             match client.get_asset_manifest(&game.platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                                 Ok(manifest_info) => {
+                                                    // Update deployment_id in metadata if possible
+                                                    if let Some(did) = extract_deployment_id(&manifest_info) {
+                                                        if let Some(mut meta) = crate::auth::load_local_metadata(&app_name) {
+                                                            meta.metadata.deployment_id = Some(did);
+                                                            let _ = crate::auth::save_local_metadata(&app_name, &meta);
+                                                        }
+                                                    }
+
                                                     if let Some(url) = find_manifest_url(&manifest_info) {
                                                         match client.download_manifest(&url, Some(app_name.as_str())) {
                                                             Ok(manifest_data) => {
@@ -759,6 +798,14 @@ impl LegendaryApp {
 
                         if let Some((plat, namespace, catalog_id, app, label)) = asset_info {
                             if let Ok(manifest_info) = client.get_asset_manifest(&plat, &namespace, &catalog_id, &app, &label) {
+                                // Update deployment_id in metadata if possible
+                                if let Some(did) = extract_deployment_id(&manifest_info) {
+                                    if let Some(mut meta) = crate::auth::load_local_metadata(&app_name) {
+                                        meta.metadata.deployment_id = Some(did);
+                                        let _ = crate::auth::save_local_metadata(&app_name, &meta);
+                                    }
+                                }
+
                                 if let Some(url) = find_manifest_url(&manifest_info) {
                                     if let Ok(manifest_data) = client.download_manifest(&url, Some(app_name.as_str())) {
                                         if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
@@ -862,6 +909,14 @@ impl LegendaryApp {
                         if let Some((plat, namespace, catalog_id, app, label)) = asset_info {
                             match client.get_asset_manifest(&plat, &namespace, &catalog_id, &app, &label) {
                                 Ok(manifest_info) => {
+                                    // Update deployment_id in metadata if possible
+                                    if let Some(did) = extract_deployment_id(&manifest_info) {
+                                        if let Some(mut meta) = crate::auth::load_local_metadata(&app_name) {
+                                            meta.metadata.deployment_id = Some(did);
+                                            let _ = crate::auth::save_local_metadata(&app_name, &meta);
+                                        }
+                                    }
+
                                     if let Some(url) = find_manifest_url(&manifest_info) {
                                         match client.download_manifest(&url, Some(app_name.as_str())) {
                                             Ok(data) => {
@@ -1176,18 +1231,30 @@ impl LegendaryApp {
                                 .or_else(|| local_meta.as_ref().map(|m| m.metadata.namespace.clone()));
 
                             // Check if game requires ownership token
-                            let requires_ot = local_meta.as_ref()
+                            let mut requires_ot = local_meta.as_ref()
                                 .and_then(|m| m.metadata.custom_attributes.as_ref())
                                 .and_then(|attrs| attrs.get("OwnershipToken"))
                                 .map(|a| a.value.to_lowercase() == "true")
                                 .unwrap_or(false);
 
+                            if !requires_ot {
+                                if let Some(item) = lib_item {
+                                    if let Some(meta) = &item.metadata {
+                                        requires_ot = meta["customAttributes"]["OwnershipToken"]["value"].as_str()
+                                            .map(|v| v.to_lowercase() == "true")
+                                            .unwrap_or(false);
+                                    }
+                                }
+                            }
+
+                            let deployment_id = local_meta.as_ref().and_then(|m| m.metadata.deployment_id.clone());
+
                             let mut ovt_path_opt = None;
 
-                            // Get ownership token if needed (or available) and not offline
+                            // Get ownership token if needed and not offline
                             if !offline {
                                 if let Some(item) = lib_item {
-                                    if requires_ot || app_name.to_lowercase().contains("hogwarts") {
+                                    if requires_ot {
                                         log::info!("Fetching ownership token for {}...", app_name);
                                         match client.get_ownership_token(&item.namespace, &item.catalog_item_id) {
                                             Ok(ovt_bytes) => {
@@ -1354,6 +1421,9 @@ impl LegendaryApp {
                                 }
                                 if let Some(ns) = &namespace {
                                     cmd.arg(format!("-epicsandboxid={}", ns));
+                                }
+                                if let Some(did) = &deployment_id {
+                                    cmd.arg(format!("-epicdeploymentid={}", did));
                                 }
                                 cmd.arg(format!("-uid={}", user_id));
                                 cmd.arg("-epiclocale=en");
@@ -1883,7 +1953,11 @@ impl LegendaryApp {
                                     if ui.button(egui::RichText::new(title).strong().size(18.0)).clicked() {
                                         self.selected_app_name = Some(item.app_name.clone());
                                         let _ = self.tx.send(WorkerMsg::FetchAssets);
-                                        let _ = self.tx.send(WorkerMsg::FetchGameInfo(item.namespace.clone(), item.catalog_item_id.clone()));
+                                        let _ = self.tx.send(WorkerMsg::FetchGameInfo {
+                                            app_name: item.app_name.clone(),
+                                            namespace: item.namespace.clone(),
+                                            catalog_item_id: item.catalog_item_id.clone(),
+                                        });
                                         self.status_message = "Fetching game info...".to_string();
                                     }
                                 });
