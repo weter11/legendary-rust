@@ -83,6 +83,8 @@ pub struct InstalledGame {
     pub title: String,
     pub version: String,
     #[serde(default)]
+    pub executable: String,
+    #[serde(default)]
     pub install_size: u64,
     #[serde(default)]
     pub download_size: u64,
@@ -116,6 +118,10 @@ pub struct LocalGameMetadata {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct LocalMetadataDetails {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub namespace: String,
     pub developer: Option<String>,
     #[serde(rename = "keyImages", default)]
     pub key_images: Vec<KeyImage>,
@@ -174,10 +180,6 @@ pub struct Entitlement {
     pub grant_date: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct OwnershipTokenResponse {
-    pub token: String,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadTicket {
