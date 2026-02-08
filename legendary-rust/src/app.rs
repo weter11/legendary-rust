@@ -1043,10 +1043,16 @@ impl LegendaryApp {
                     WorkerMsg::LaunchGame { app_name, token, user_id } => {
                         let installed_games = crate::auth::load_installed_games();
                         let installed = installed_games.iter().find(|g| g.app_name == app_name).cloned();
+
                         if let Some(installed) = installed {
                             let local_meta = crate::auth::load_local_metadata(&app_name);
+                            let path = std::path::PathBuf::from(&installed.install_path);
+                            let config = AppConfig::load();
+                            let mut found = false;
 
-                            // Check offline capability
+                            let game_settings = config.games.get(&app_name);
+
+                            // Check if game can run offline
                             let can_run_offline = local_meta.as_ref()
                                 .and_then(|m| m.metadata.custom_attributes.as_ref())
                                 .and_then(|attrs| attrs.get("CanRunOffline"))
@@ -1059,12 +1065,6 @@ impl LegendaryApp {
                                 ));
                                 continue;
                             }
-
-                            let path = std::path::PathBuf::from(&installed.install_path);
-                            let config = AppConfig::load();
-                            let mut found = false;
-
-                            let game_settings = config.games.get(&app_name);
 
                             // Pre-launch command
                             let pre_launch = if let Some(gs) = game_settings {
@@ -1101,14 +1101,15 @@ impl LegendaryApp {
                             let custom_exe = game_settings.and_then(|s| s.custom_exe_path.clone());
 
                             let mut possible_exes = Vec::new();
+
+                            // If custom exe is specified, use only that
                             if let Some(ce) = custom_exe {
                                 possible_exes.push(ce);
                             } else {
-                                if !installed.executable.is_empty() {
-                                    possible_exes.push(path.join(installed.executable.replace('\\', "/").trim_start_matches('/')));
-                                }
-
+                                // Build list of possible executable names
                                 let mut possible_names = vec![app_name.clone()];
+
+                                // Add names from metadata
                                 if let Some(meta) = &local_meta {
                                     if let Some(attrs) = &meta.metadata.custom_attributes {
                                         if let Some(folder) = attrs.get("FolderName") {
@@ -1117,93 +1118,170 @@ impl LegendaryApp {
                                     }
                                 }
 
+                                // If we have an executable from the installed game info, prioritize it
+                                if !installed.executable.is_empty() {
+                                    let exe_path = path.join(installed.executable.replace('\\', "/").trim_start_matches('/'));
+                                    if exe_path.exists() {
+                                        possible_exes.push(exe_path);
+                                    }
+                                }
+
+                                // Search for executables based on possible names
                                 for name in possible_names {
                                     for ext in &["exe", "sh", ""] {
-                                        let filename = if ext.is_empty() { name.clone() } else { format!("{}.{}", name, ext) };
-                                        possible_exes.push(path.join(filename));
+                                        let filename = if ext.is_empty() {
+                                            name.clone()
+                                        } else {
+                                            format!("{}.{}", name, ext)
+                                        };
+
+                                        let exe_path = path.join(&filename);
+                                        if exe_path.exists() && !possible_exes.contains(&exe_path) {
+                                            possible_exes.push(exe_path);
+                                        }
+                                    }
+                                }
+
+                                // If still nothing found, scan the install directory for any .exe files
+                                if possible_exes.is_empty() {
+                                    log::warn!("No executables found using standard names, scanning directory...");
+                                    if let Ok(entries) = std::fs::read_dir(&path) {
+                                        for entry in entries.flatten() {
+                                            let entry_path = entry.path();
+                                            if entry_path.is_file() {
+                                                if let Some(ext) = entry_path.extension() {
+                                                    if ext == "exe" {
+                                                        let filename = entry_path.file_name()
+                                                            .unwrap_or_default()
+                                                            .to_string_lossy()
+                                                            .to_lowercase();
+                                                        // Skip known non-game executables
+                                                        if !filename.contains("crash") &&
+                                                           !filename.contains("unins") &&
+                                                           !filename.contains("redist") &&
+                                                           !filename.contains("prereq") {
+                                                            possible_exes.push(entry_path);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
 
-                            'search: for exe_path in possible_exes {
-                                if exe_path.exists() {
-                                    let use_umu = game_settings.map(|s| s.use_umu).unwrap_or(config.global.use_umu);
+                            log::info!("Possible executables: {:?}", possible_exes);
 
-                                    let mut cmd = if use_umu && std::env::consts::OS == "linux" {
-                                        let mut c = std::process::Command::new("/usr/bin/umu-run");
-                                        let store = game_settings.and_then(|s| s.umu_store.clone()).unwrap_or_else(|| config.global.umu_store.clone());
-                                        c.env("STORE", store);
-                                        c.env("GAMEID", "umu-default");
+                            // Check if game requires ownership token
+                            let requires_ot = local_meta.as_ref()
+                                .and_then(|m| m.metadata.custom_attributes.as_ref())
+                                .and_then(|attrs| attrs.get("OwnershipToken"))
+                                .map(|a| a.value.to_lowercase() == "true")
+                                .unwrap_or(false);
 
-                                        let pfx_path = if let Some(gs) = game_settings {
-                                            if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
-                                            else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
-                                            else { get_default_compat_data_path() }
-                                        } else if config.global.use_custom_pfx {
-                                            config.global.custom_pfx_path.clone()
-                                        } else {
-                                            get_default_compat_data_path()
-                                        };
+                            let mut ovt_path_opt = None;
 
-                                        if let Some(path) = pfx_path {
-                                            c.env("WINEPREFIX", path);
-                                        }
-
-                                        if let Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) = game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
-                                            if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
-                                                c.env("PROTONPATH", path);
+                            // Get ownership token if needed and not offline
+                            if requires_ot && !token.is_empty() {
+                                let lib_item = cached_library_items.iter().find(|i| i.app_name == app_name);
+                                if let Some(item) = lib_item {
+                                    log::info!("Game requires ownership token, fetching...");
+                                    match client.get_ownership_token(&item.namespace, &item.catalog_item_id) {
+                                        Ok(ovt_bytes) => {
+                                            let ovt_path = std::env::temp_dir()
+                                                .join(format!("{}{}.ovt", item.namespace, item.catalog_item_id));
+                                            match std::fs::write(&ovt_path, &ovt_bytes) {
+                                                Ok(_) => {
+                                                    log::info!("Saved ownership token to {:?}", ovt_path);
+                                                    ovt_path_opt = Some(ovt_path);
+                                                }
+                                                Err(e) => {
+                                                    let _ = tx.send(WorkerResponse::Error(
+                                                        format!("Failed to save ownership token: {}", e)
+                                                    ));
+                                                    continue;
+                                                }
                                             }
                                         }
-                                        c.arg(exe_path);
-                                        c
-                                    } else if std::env::consts::OS == "linux" {
-                                        let mut c = match game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
-                                            Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) => {
-                                                if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
-                                                    let mut p = path.clone();
-                                                    p.push("proton"); // Typical proton entry point
-                                                    let is_proton = p.exists();
-                                                    if !is_proton {
-                                                        p.pop();
-                                                        p.push("bin/wine");
-                                                    }
-                                                    let mut command = std::process::Command::new(p);
-                                                    if is_proton {
-                                                        let pfx_path = if let Some(gs) = game_settings {
-                                                            if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
-                                                            else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
-                                                            else { get_default_compat_data_path() }
-                                                        } else if config.global.use_custom_pfx {
-                                                            config.global.custom_pfx_path.clone()
-                                                        } else {
-                                                            get_default_compat_data_path()
-                                                        };
+                                        Err(e) => {
+                                            log::warn!("Failed to get ownership token: {}. Continuing without it...", e);
+                                            // Don't fail - some games might work without it
+                                        }
+                                    }
+                                }
+                            }
 
-                                                        if let Some(path) = pfx_path {
-                                                            command.env("STEAM_COMPAT_DATA_PATH", path);
-                                                        }
-                                                        if let Some(home) = home::home_dir() {
-                                                            command.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", home.join(".local/share/Steam"));
-                                                        }
-                                                        command.arg("run");
+                            // Try each possible executable
+                            'search: for exe_path in possible_exes {
+                                if !exe_path.exists() {
+                                    continue;
+                                }
+
+                                log::info!("Trying to launch: {:?}", exe_path);
+
+                                let use_umu = game_settings.map(|s| s.use_umu).unwrap_or(config.global.use_umu);
+
+                                let mut cmd = if use_umu && std::env::consts::OS == "linux" {
+                                    let mut c = std::process::Command::new("/usr/bin/umu-run");
+                                    let store = game_settings.and_then(|s| s.umu_store.clone())
+                                        .unwrap_or_else(|| config.global.umu_store.clone());
+                                    c.env("STORE", store);
+                                    c.env("GAMEID", "umu-default");
+
+                                    let pfx_path = if let Some(gs) = game_settings {
+                                        if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                        else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
+                                        else { get_default_compat_data_path() }
+                                    } else if config.global.use_custom_pfx {
+                                        config.global.custom_pfx_path.clone()
+                                    } else {
+                                        get_default_compat_data_path()
+                                    };
+
+                                    if let Some(path) = pfx_path {
+                                        c.env("WINEPREFIX", path);
+                                    }
+
+                                    if let Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) =
+                                        game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
+                                        if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
+                                            c.env("PROTONPATH", path);
+                                        }
+                                    }
+                                    c.arg(&exe_path);
+                                    c
+                                } else if std::env::consts::OS == "linux" {
+                                    let mut c = match game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
+                                        Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) => {
+                                            if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
+                                                let mut p = path.clone();
+                                                p.push("proton");
+                                                let is_proton = p.exists();
+                                                if !is_proton {
+                                                    p.pop();
+                                                    p.push("bin/wine");
+                                                }
+                                                let mut command = std::process::Command::new(p);
+                                                if is_proton {
+                                                    let pfx_path = if let Some(gs) = game_settings {
+                                                        if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                        else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
+                                                        else { get_default_compat_data_path() }
+                                                    } else if config.global.use_custom_pfx {
+                                                        config.global.custom_pfx_path.clone()
                                                     } else {
-                                                        // Custom/System Wine
-                                                        let pfx_path = if let Some(gs) = game_settings {
-                                                            if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
-                                                            else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
-                                                            else { None }
-                                                        } else if config.global.use_custom_pfx {
-                                                            config.global.custom_pfx_path.clone()
-                                                        } else {
-                                                            None
-                                                        };
-                                                        if let Some(path) = pfx_path {
-                                                            command.env("WINEPREFIX", path);
-                                                        }
+                                                        get_default_compat_data_path()
+                                                    };
+
+                                                    if let Some(path) = pfx_path {
+                                                        command.env("STEAM_COMPAT_DATA_PATH", path);
                                                     }
-                                                    command
+                                                    if let Some(home) = home::home_dir() {
+                                                        command.env("STEAM_COMPAT_CLIENT_INSTALL_PATH",
+                                                                   home.join(".local/share/Steam"));
+                                                    }
+                                                    command.arg("run");
                                                 } else {
-                                                    let mut command = std::process::Command::new("wine");
                                                     let pfx_path = if let Some(gs) = game_settings {
                                                         if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
                                                         else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
@@ -1216,10 +1294,9 @@ impl LegendaryApp {
                                                     if let Some(path) = pfx_path {
                                                         command.env("WINEPREFIX", path);
                                                     }
-                                                    command
                                                 }
-                                            }
-                                            Some(CompatibilityTool::SystemWine) | None => {
+                                                command
+                                            } else {
                                                 let mut command = std::process::Command::new("wine");
                                                 let pfx_path = if let Some(gs) = game_settings {
                                                     if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
@@ -1235,128 +1312,123 @@ impl LegendaryApp {
                                                 }
                                                 command
                                             }
-                                        };
-                                        c.arg(exe_path);
-                                        c
-                                    } else {
-                                        std::process::Command::new(exe_path)
-                                    };
-
-                                    // Check if game requires ownership token
-                                    let requires_ot = local_meta.as_ref()
-                                        .and_then(|m| m.metadata.custom_attributes.as_ref())
-                                        .and_then(|attrs| attrs.get("OwnershipToken"))
-                                        .map(|a| a.value.to_lowercase() == "true")
-                                        .unwrap_or(false);
-
-                                    let mut ovt_path_opt = None;
-
-                                    // Get ownership token if needed and not offline
-                                    if requires_ot && !token.is_empty() {
-                                        let lib_item = cached_library_items.iter().find(|i| i.app_name == app_name);
-
-                                        if let Some(item) = lib_item {
-                                            match client.get_ownership_token(&item.namespace, &item.catalog_item_id) {
-                                                Ok(ovt_bytes) => {
-                                                    // Save to temp file
-                                                    let ovt_path = std::env::temp_dir().join(format!("{}{}.ovt", item.namespace, item.catalog_item_id));
-                                                    match std::fs::write(&ovt_path, &ovt_bytes) {
-                                                        Ok(_) => {
-                                                            ovt_path_opt = Some(ovt_path);
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = tx.send(WorkerResponse::Error(format!("Failed to save ownership token: {}", e)));
-                                                            continue;
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to get ownership token: {}. Try running the game through Epic Games Launcher once first.", e)));
-                                                    continue;
-                                                }
+                                        }
+                                        Some(CompatibilityTool::SystemWine) | None => {
+                                            let mut command = std::process::Command::new("wine");
+                                            let pfx_path = if let Some(gs) = game_settings {
+                                                if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
+                                                else { None }
+                                            } else if config.global.use_custom_pfx {
+                                                config.global.custom_pfx_path.clone()
+                                            } else {
+                                                None
+                                            };
+                                            if let Some(path) = pfx_path {
+                                                command.env("WINEPREFIX", path);
                                             }
-                                        } else {
-                                            let _ = tx.send(WorkerResponse::Error("Could not find game in library to get ownership token".to_string()));
-                                            continue;
+                                            command
                                         }
-                                    }
-
-                                    // Epic arguments
-                                    cmd.arg("-AUTH_LOGIN=unused");
-                                    cmd.arg(format!("-AUTH_PASSWORD={}", token));
-                                    cmd.arg("-AUTH_TYPE=exchangecode");
-                                    cmd.arg(format!("-epicapp={}", app_name));
-                                    cmd.arg("-epicenv=Prod");
-                                    cmd.arg("-EpicPortal");
-                                    cmd.arg(format!("-epicuserid={}", user_id));
-                                    cmd.arg("-epiclocale=en");
-
-                                    if let Some(ovt_path) = ovt_path_opt {
-                                        cmd.arg(format!("-epicovt={}", ovt_path.display()));
-                                    }
-
-                                    let eos_installed = installed_games.iter().any(|g| g.app_name == crate::eos::EOS_OVERLAY_APP_ID);
-                                    let overlay_enabled = if let Some(gs) = game_settings {
-                                        gs.eos_overlay_enabled
-                                    } else {
-                                        config.global.eos_overlay_enabled
                                     };
+                                    c.arg(&exe_path);
+                                    c
+                                } else {
+                                    std::process::Command::new(&exe_path)
+                                };
 
-                                    if !overlay_enabled || !eos_installed {
-                                        cmd.env("EOS_OVERLAY_KILLED", "1");
-                                    }
+                                // Set working directory to where the exe is
+                                if let Some(parent) = exe_path.parent() {
+                                    cmd.current_dir(parent);
+                                }
 
-                                    // Steam Compatibility Environment Variables
-                                    if let Some(val) = game_settings.and_then(|s| s.steam_compat_install_path.as_ref()).or_else(|| config.global.steam_compat_install_path.as_ref()) {
-                                        cmd.env("STEAM_COMPAT_INSTALL_PATH", val);
-                                    }
-                                    if let Some(val) = game_settings.and_then(|s| s.steam_compat_client_install_path.as_ref()).or_else(|| config.global.steam_compat_client_install_path.as_ref()) {
-                                        cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", val);
-                                    }
-                                    if let Some(val) = game_settings.and_then(|s| s.steam_compat_data_path.as_ref()).or_else(|| config.global.steam_compat_data_path.as_ref()) {
-                                        cmd.env("STEAM_COMPAT_DATA_PATH", val);
-                                    }
-                                    if let Some(val) = game_settings.and_then(|s| s.steam_compat_app_id.as_ref()).or_else(|| config.global.steam_compat_app_id.as_ref()) {
-                                        cmd.env("STEAM_COMPAT_APP_ID", val);
-                                    }
-                                    cmd.env("APP_NAME", &app_name);
+                                // Epic arguments
+                                cmd.arg("-AUTH_LOGIN=unused");
+                                cmd.arg(format!("-AUTH_PASSWORD={}", token));
+                                cmd.arg("-AUTH_TYPE=exchangecode");
+                                cmd.arg(format!("-epicapp={}", app_name));
+                                cmd.arg("-epicenv=Prod");
+                                cmd.arg("-EpicPortal");
+                                cmd.arg(format!("-epicuserid={}", user_id));
+                                cmd.arg("-epiclocale=en");
 
-                                    // Log launch info to terminal
-                                    println!("--- Launch Info ---");
-                                    let vars = ["GAMEID", "STORE", "STEAM_COMPAT_INSTALL_PATH", "LD_PRELOAD", "STEAM_COMPAT_CLIENT_INSTALL_PATH", "WINEPREFIX", "STEAM_COMPAT_DATA_PATH", "PROTONPATH", "STEAM_COMPAT_APP_ID", "APP_NAME"];
-                                    for var in vars {
-                                        let val = cmd.get_envs().find(|(k, _)| k.to_str() == Some(var))
-                                            .and_then(|(_, v)| v)
-                                            .map(|v| v.to_string_lossy().into_owned())
-                                            .or_else(|| std::env::var(var).ok())
-                                            .unwrap_or_default();
-                                        println!("{}: {}", var, val);
-                                    }
-                                    println!("-------------------");
+                                if let Some(ovt_path) = &ovt_path_opt {
+                                    cmd.arg(format!("-epicovt={}", ovt_path.display()));
+                                }
 
-                                    if let Some(settings) = game_settings {
-                                        if settings.play_offline {
-                                            cmd.arg("-offline");
-                                        }
-                                        for param in settings.start_params.split_whitespace() {
-                                            cmd.arg(param);
-                                        }
-                                    }
+                                let eos_installed = installed_games.iter().any(|g| g.app_name == crate::eos::EOS_OVERLAY_APP_ID);
+                                let overlay_enabled = if let Some(gs) = game_settings {
+                                    gs.eos_overlay_enabled
+                                } else {
+                                    config.global.eos_overlay_enabled
+                                };
 
-                                    match cmd.spawn() {
-                                        Ok(child) => {
-                                            let _ = tx.send(WorkerResponse::GameLaunched { app_name: app_name.clone(), child });
-                                            found = true;
-                                        }
-                                        Err(e) => {
-                                            let _ = tx.send(WorkerResponse::Error(format!("Failed to spawn process: {}", e)));
-                                        }
+                                if !overlay_enabled || !eos_installed {
+                                    cmd.env("EOS_OVERLAY_KILLED", "1");
+                                }
+
+                                // Additional environment variables and parameters...
+                                if let Some(val) = game_settings.and_then(|s| s.steam_compat_install_path.as_ref())
+                                    .or_else(|| config.global.steam_compat_install_path.as_ref()) {
+                                    cmd.env("STEAM_COMPAT_INSTALL_PATH", val);
+                                }
+                                if let Some(val) = game_settings.and_then(|s| s.steam_compat_client_install_path.as_ref())
+                                    .or_else(|| config.global.steam_compat_client_install_path.as_ref()) {
+                                    cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", val);
+                                }
+                                if let Some(val) = game_settings.and_then(|s| s.steam_compat_data_path.as_ref())
+                                    .or_else(|| config.global.steam_compat_data_path.as_ref()) {
+                                    cmd.env("STEAM_COMPAT_DATA_PATH", val);
+                                }
+                                if let Some(val) = game_settings.and_then(|s| s.steam_compat_app_id.as_ref())
+                                    .or_else(|| config.global.steam_compat_app_id.as_ref()) {
+                                    cmd.env("STEAM_COMPAT_APP_ID", val);
+                                }
+                                cmd.env("APP_NAME", &app_name);
+
+                                // Log launch info
+                                println!("--- Launch Info ---");
+                                println!("Executable: {:?}", exe_path);
+                                let vars = ["GAMEID", "STORE", "STEAM_COMPAT_INSTALL_PATH", "LD_PRELOAD",
+                                           "STEAM_COMPAT_CLIENT_INSTALL_PATH", "WINEPREFIX", "STEAM_COMPAT_DATA_PATH",
+                                           "PROTONPATH", "STEAM_COMPAT_APP_ID", "APP_NAME"];
+                                for var in vars {
+                                    let val = cmd.get_envs().find(|(k, _)| k.to_str() == Some(var))
+                                        .and_then(|(_, v)| v)
+                                        .map(|v| v.to_string_lossy().into_owned())
+                                        .or_else(|| std::env::var(var).ok())
+                                        .unwrap_or_default();
+                                    println!("{}: {}", var, val);
+                                }
+                                println!("-------------------");
+
+                                if let Some(settings) = game_settings {
+                                    if settings.play_offline {
+                                        cmd.arg("-offline");
                                     }
-                                    break 'search;
+                                    for param in settings.start_params.split_whitespace() {
+                                        cmd.arg(param);
+                                    }
+                                }
+
+                                match cmd.spawn() {
+                                    Ok(child) => {
+                                        let _ = tx.send(WorkerResponse::GameLaunched {
+                                            app_name: app_name.clone(),
+                                            child
+                                        });
+                                        found = true;
+                                        break 'search;
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to spawn process for {:?}: {}", exe_path, e);
+                                    }
                                 }
                             }
+
                             if !found {
-                                let _ = tx.send(WorkerResponse::Error(format!("Could not find executable in {}", installed.install_path)));
+                                let _ = tx.send(WorkerResponse::Error(
+                                    format!("Could not find or launch executable in {}", installed.install_path)
+                                ));
                             }
                         }
                     }
