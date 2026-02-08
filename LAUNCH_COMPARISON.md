@@ -60,6 +60,18 @@ Both implementations follow a similar high-level process to launch a game:
         *Note: This process typically invalidates the session in the official Epic Games Launcher, logging it out.*
 *   **Rust**: Currently lacks any decryption logic. Since **EGL Auth Import** is not yet implemented (see Roadmap), the Rust version does not yet require the AES decryption routines found in the Python version. If this feature is implemented in the future, a Rust equivalent of `egl_crypt.py` will be necessary to handle Epic's encrypted configuration files.
 
+### Cloud & Local Saves
+*   **Python (`legendary`)**:
+    *   **API Usage**: Uses the `datastorage-public-service` (SaveSync API), which is the same API used by the official Epic Games Launcher.
+    *   **Implementation**: Implements a sophisticated chunk-based system. Saves are split into 1MB chunks and a manifest is generated. This allows for delta-syncing (only uploading changed chunks) and perfect compatibility with EGL.
+    *   **Path Resolution**: Highly automated. It can resolve Windows/Wine environment variables like `{usersavedgames}`, `{locallow}`, and `{roaming}` on Linux and macOS by scanning the Wine registry or using internal fallbacks.
+    *   **Management**: Includes comprehensive CLI tools for syncing, listing, downloading backups, and cleaning up corrupted/incomplete cloud saves (`clean-saves`).
+*   **Rust (`legendary-rust`)**:
+    *   **API Usage**: Uses the simpler `cloudstorage-public-service` for direct file storage.
+    *   **Implementation**: Simple file-based upload/download. It manages saves by transferring whole files, which is easier to implement but less efficient for very large save files.
+    *   **Path Resolution**: Primarily manual. Users are expected to set the save path in the GUI. It provides a "hint" based on the `CloudSaveFolder` metadata attribute but does not perform the same advanced variable expansion as the Python version.
+    *   **Management**: Provides a GUI for manual sync, upload, and download. It tracks local vs. remote timestamps to notify users of out-of-sync states.
+
 ## 4. Feature Gaps in Rust
 
 While the Rust implementation offers a modern GUI and streamlined launch flow, several features from the original Python version are still missing:
