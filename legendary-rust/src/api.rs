@@ -144,6 +144,10 @@ impl EgsClient {
         self.token_info.as_ref().map(|t| t.account_id.clone())
     }
 
+    pub fn get_display_name(&self) -> Option<String> {
+        self.token_info.as_ref().and_then(|t| t.display_name.clone())
+    }
+
     pub fn get_library_items(&mut self) -> Result<Vec<LibraryItem>> {
         self.refresh_if_needed()?;
         let mut records = Vec::new();
