@@ -19,9 +19,9 @@ pub struct Downloader {
 }
 
 impl Downloader {
-    pub fn new(base_url: String, tx: Sender<WorkerResponse>, cancel: Arc<AtomicBool>, pause: Arc<AtomicBool>) -> Self {
+    pub fn new(base_url: String, user_agent: String, tx: Sender<WorkerResponse>, cancel: Arc<AtomicBool>, pause: Arc<AtomicBool>) -> Self {
         let client = reqwest::blocking::Client::builder()
-            .user_agent("UELauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit")
+            .user_agent(user_agent)
             .build()
             .unwrap();
 
