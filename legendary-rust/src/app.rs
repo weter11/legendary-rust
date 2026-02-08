@@ -313,6 +313,7 @@ impl LegendaryApp {
         std::thread::spawn(move || {
             let cancel = worker_cancel_clone;
             let pause = worker_pause_clone;
+            let mut cached_library_items: Vec<LibraryItem> = Vec::new();
 
             let check_status = || {
                 while pause.load(Ordering::SeqCst) {
@@ -340,6 +341,7 @@ impl LegendaryApp {
                 client.set_token(&saved_token);
                 match client.get_library_items() {
                     Ok(items) => {
+                        cached_library_items = items.clone();
                         let _ = tx.send(WorkerResponse::LoggedIn(saved_token));
                         let _ = tx.send(WorkerResponse::LibraryFetched(items));
                         ctx_clone.request_repaint();
@@ -372,6 +374,7 @@ impl LegendaryApp {
                                 let _ = tx.send(WorkerResponse::LoggedIn(token));
                                 // Fetch library immediately after login
                                 if let Ok(items) = client.get_library_items() {
+                                    cached_library_items = items.clone();
                                     let _ = tx.send(WorkerResponse::LibraryFetched(items));
                                     ctx_clone.request_repaint();
                                 }
@@ -387,6 +390,7 @@ impl LegendaryApp {
                                 let _ = tx.send(WorkerResponse::LoggedIn(token));
                                 // Fetch library immediately after login
                                 if let Ok(items) = client.get_library_items() {
+                                    cached_library_items = items.clone();
                                     let _ = tx.send(WorkerResponse::LibraryFetched(items));
                                     ctx_clone.request_repaint();
                                 }
@@ -456,6 +460,7 @@ impl LegendaryApp {
                     WorkerMsg::RefreshLibrary => {
                         match client.get_library_items() {
                             Ok(items) => {
+                                cached_library_items = items.clone();
                                 let _ = tx.send(WorkerResponse::LibraryFetched(items));
                                 ctx_clone.request_repaint();
                             }
@@ -1049,7 +1054,7 @@ impl LegendaryApp {
                                 let _ = tx.send(WorkerResponse::Error(
                                     "This game cannot run offline and no token was provided".to_string()
                                 ));
-                                return;
+                                continue;
                             }
 
                             let path = std::path::PathBuf::from(&installed.install_path);
@@ -1237,33 +1242,35 @@ impl LegendaryApp {
                                         .map(|a| a.value.to_lowercase() == "true")
                                         .unwrap_or(false);
 
+                                    let mut ovt_path_opt = None;
+
                                     // Get ownership token if needed and not offline
                                     if requires_ot && !token.is_empty() {
-                                        let catalog_item_id = local_meta.as_ref()
-                                            .map(|m| m.metadata.id.clone())
-                                            .filter(|id| !id.is_empty())
-                                            .unwrap_or_else(|| app_name.clone());
-                                        let namespace = local_meta.as_ref()
-                                            .map(|m| m.metadata.namespace.clone())
-                                            .unwrap_or_default();
+                                        let lib_item = cached_library_items.iter().find(|i| i.app_name == app_name);
 
-                                        if !namespace.is_empty() {
-                                            match client.get_ownership_token(&namespace, &catalog_item_id) {
-                                                Ok(ovt_token) => {
+                                        if let Some(item) = lib_item {
+                                            match client.get_ownership_token(&item.namespace, &item.catalog_item_id) {
+                                                Ok(ovt_bytes) => {
                                                     // Save to temp file
-                                                    let ovt_path = std::env::temp_dir().join(format!("{}{}.ovt", namespace, catalog_item_id));
-                                                    if let Err(e) = std::fs::write(&ovt_path, ovt_token) {
-                                                        log::error!("Failed to save ownership token: {}", e);
-                                                    } else {
-                                                        // Add to command args
-                                                        cmd.arg(format!("-epicovt={}", ovt_path.display()));
+                                                    let ovt_path = std::env::temp_dir().join(format!("{}{}.ovt", item.namespace, item.catalog_item_id));
+                                                    match std::fs::write(&ovt_path, &ovt_bytes) {
+                                                        Ok(_) => {
+                                                            ovt_path_opt = Some(ovt_path);
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx.send(WorkerResponse::Error(format!("Failed to save ownership token: {}", e)));
+                                                            continue;
+                                                        }
                                                     }
                                                 }
                                                 Err(e) => {
-                                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to get ownership token: {}", e)));
-                                                    return;
+                                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to get ownership token: {}. Try running the game through Epic Games Launcher once first.", e)));
+                                                    continue;
                                                 }
                                             }
+                                        } else {
+                                            let _ = tx.send(WorkerResponse::Error("Could not find game in library to get ownership token".to_string()));
+                                            continue;
                                         }
                                     }
 
@@ -1276,6 +1283,10 @@ impl LegendaryApp {
                                     cmd.arg("-EpicPortal");
                                     cmd.arg(format!("-epicuserid={}", user_id));
                                     cmd.arg("-epiclocale=en");
+
+                                    if let Some(ovt_path) = ovt_path_opt {
+                                        cmd.arg(format!("-epicovt={}", ovt_path.display()));
+                                    }
 
                                     let eos_installed = installed_games.iter().any(|g| g.app_name == crate::eos::EOS_OVERLAY_APP_ID);
                                     let overlay_enabled = if let Some(gs) = game_settings {

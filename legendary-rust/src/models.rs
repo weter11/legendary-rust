@@ -178,10 +178,6 @@ pub struct Entitlement {
     pub grant_date: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct OwnershipTokenResponse {
-    pub token: String,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadTicket {

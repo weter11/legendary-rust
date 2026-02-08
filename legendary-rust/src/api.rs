@@ -302,21 +302,38 @@ impl EgsClient {
         Ok(())
     }
 
-    pub fn get_ownership_token(&mut self, namespace: &str, catalog_item_id: &str) -> Result<String> {
+    pub fn get_ownership_token(&mut self, namespace: &str, catalog_item_id: &str) -> Result<Vec<u8>> {
         self.refresh_if_needed()?;
-        let url = format!("https://ecommerce-public-service-ecomprod02.ol.epicgames.com/ecommerce/api/public/namespaces/{}/items/{}/ownership/token", namespace, catalog_item_id);
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let token = self.token_info.as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
-        let response = self.client.get(&url)
+        let account_id = self.token_info.as_ref()
+            .map(|t| t.account_id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("No account ID"))?;
+
+        let url = format!(
+            "https://ecommerce-public-service-ecomprod02.ol.epicgames.com/ecommerce/api/public/platforms/EPIC/identities/{}/ownershipToken",
+            account_id
+        );
+
+        let ns_catalog = format!("{}:{}", namespace, catalog_item_id);
+
+        let mut form_data = std::collections::HashMap::new();
+        form_data.insert("nsCatalogItemId", ns_catalog);
+
+        let response = self.client.post(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
+            .form(&form_data)
             .send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to get ownership token: {}", response.status()));
+            return Err(anyhow::anyhow!("Failed to get ownership token: {} - {}",
+                                       response.status(),
+                                       response.text().unwrap_or_default()));
         }
 
-        let json: OwnershipTokenResponse = response.json()?;
-        Ok(json.token)
+        Ok(response.bytes()?.to_vec())
     }
 
     pub fn get_launcher_manifests(&mut self, platform: &str) -> Result<serde_json::Value> {
