@@ -116,6 +116,10 @@ pub struct LocalGameMetadata {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct LocalMetadataDetails {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub namespace: String,
     pub developer: Option<String>,
     #[serde(rename = "keyImages", default)]
     pub key_images: Vec<KeyImage>,

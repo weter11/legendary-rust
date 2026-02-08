@@ -1037,6 +1037,21 @@ impl LegendaryApp {
                         let installed = installed_games.iter().find(|g| g.app_name == app_name).cloned();
                         if let Some(installed) = installed {
                             let local_meta = crate::auth::load_local_metadata(&app_name);
+
+                            // Check offline capability
+                            let can_run_offline = local_meta.as_ref()
+                                .and_then(|m| m.metadata.custom_attributes.as_ref())
+                                .and_then(|attrs| attrs.get("CanRunOffline"))
+                                .map(|a| a.value.to_lowercase() == "true")
+                                .unwrap_or(true);
+
+                            if token.is_empty() && !can_run_offline {
+                                let _ = tx.send(WorkerResponse::Error(
+                                    "This game cannot run offline and no token was provided".to_string()
+                                ));
+                                return;
+                            }
+
                             let path = std::path::PathBuf::from(&installed.install_path);
                             let config = AppConfig::load();
                             let mut found = false;
@@ -1215,6 +1230,43 @@ impl LegendaryApp {
                                         std::process::Command::new(exe_path)
                                     };
 
+                                    // Check if game requires ownership token
+                                    let requires_ot = local_meta.as_ref()
+                                        .and_then(|m| m.metadata.custom_attributes.as_ref())
+                                        .and_then(|attrs| attrs.get("OwnershipToken"))
+                                        .map(|a| a.value.to_lowercase() == "true")
+                                        .unwrap_or(false);
+
+                                    // Get ownership token if needed and not offline
+                                    if requires_ot && !token.is_empty() {
+                                        let catalog_item_id = local_meta.as_ref()
+                                            .map(|m| m.metadata.id.clone())
+                                            .filter(|id| !id.is_empty())
+                                            .unwrap_or_else(|| app_name.clone());
+                                        let namespace = local_meta.as_ref()
+                                            .map(|m| m.metadata.namespace.clone())
+                                            .unwrap_or_default();
+
+                                        if !namespace.is_empty() {
+                                            match client.get_ownership_token(&namespace, &catalog_item_id) {
+                                                Ok(ovt_token) => {
+                                                    // Save to temp file
+                                                    let ovt_path = std::env::temp_dir().join(format!("{}{}.ovt", namespace, catalog_item_id));
+                                                    if let Err(e) = std::fs::write(&ovt_path, ovt_token) {
+                                                        log::error!("Failed to save ownership token: {}", e);
+                                                    } else {
+                                                        // Add to command args
+                                                        cmd.arg(format!("-epicovt={}", ovt_path.display()));
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to get ownership token: {}", e)));
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     // Epic arguments
                                     cmd.arg("-AUTH_LOGIN=unused");
                                     cmd.arg(format!("-AUTH_PASSWORD={}", token));
@@ -1225,13 +1277,14 @@ impl LegendaryApp {
                                     cmd.arg(format!("-epicuserid={}", user_id));
                                     cmd.arg("-epiclocale=en");
 
+                                    let eos_installed = installed_games.iter().any(|g| g.app_name == crate::eos::EOS_OVERLAY_APP_ID);
                                     let overlay_enabled = if let Some(gs) = game_settings {
                                         gs.eos_overlay_enabled
                                     } else {
                                         config.global.eos_overlay_enabled
                                     };
 
-                                    if !overlay_enabled {
+                                    if !overlay_enabled || !eos_installed {
                                         cmd.env("EOS_OVERLAY_KILLED", "1");
                                     }
 
