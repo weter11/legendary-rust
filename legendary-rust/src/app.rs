@@ -116,15 +116,13 @@ pub(crate) enum WorkerMsg {
         search_paths: Vec<std::path::PathBuf>,
     },
     EglSync,
-    FetchGameToken(String),
     ListFiles {
         app_name: String,
         catalog_item_id: String,
     },
     LaunchGame {
         app_name: String,
-        token: String,
-        user_id: String,
+        offline: bool,
     },
     QueryEosStatus {
         prefix: Option<std::path::PathBuf>,
@@ -164,11 +162,6 @@ pub(crate) enum WorkerResponse {
     },
     InstallInfoFetched(crate::models::InstallInfo),
     GamesScanned(Vec<InstalledGame>),
-    GameTokenFetched {
-        app_name: String,
-        token: String,
-        user_id: String,
-    },
     FilesListed(Vec<String>),
     GameLaunched {
         app_name: String,
@@ -979,18 +972,6 @@ impl LegendaryApp {
                         let _ = tx.send(WorkerResponse::TaskFinished("EGL Sync complete".to_string()));
                         ctx_clone.request_repaint();
                     }
-                    WorkerMsg::FetchGameToken(app_name) => {
-                        match client.get_game_token() {
-                            Ok(token) => {
-                                let user_id = client.get_account_id().unwrap_or_default();
-                                let _ = tx.send(WorkerResponse::GameTokenFetched { app_name, token, user_id });
-                            }
-                            Err(e) => {
-                                let _ = tx.send(WorkerResponse::Error(format!("Failed to fetch game token: {}", e)));
-                            }
-                        }
-                        ctx_clone.request_repaint();
-                    }
                     WorkerMsg::ListFiles { app_name, catalog_item_id } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Listing files for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
 
@@ -1040,7 +1021,7 @@ impl LegendaryApp {
                         }
                         ctx_clone.request_repaint();
                     }
-                    WorkerMsg::LaunchGame { app_name, token, user_id } => {
+                    WorkerMsg::LaunchGame { app_name, offline } => {
                         let installed_games = crate::auth::load_installed_games();
                         let installed = installed_games.iter().find(|g| g.app_name == app_name).cloned();
 
@@ -1059,7 +1040,25 @@ impl LegendaryApp {
                                 .map(|a| a.value.to_lowercase() == "true")
                                 .unwrap_or(true);
 
-                            if token.is_empty() && !can_run_offline {
+                            let mut token = "0".to_string();
+                            let mut user_id = client.get_account_id().unwrap_or_default();
+                            let mut display_name = client.get_display_name();
+
+                            if !offline {
+                                match client.get_game_token() {
+                                    Ok(t) => {
+                                        token = t;
+                                        user_id = client.get_account_id().unwrap_or_default();
+                                        display_name = client.get_display_name();
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(WorkerResponse::Error(format!("Failed to fetch game token: {}", e)));
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            if token == "0" && !can_run_offline {
                                 let _ = tx.send(WorkerResponse::Error(
                                     "This game cannot run offline and no token was provided".to_string()
                                 ));
@@ -1172,6 +1171,10 @@ impl LegendaryApp {
 
                             log::info!("Possible executables: {:?}", possible_exes);
 
+                            let lib_item = cached_library_items.iter().find(|i| i.app_name == app_name);
+                            let namespace = lib_item.map(|i| i.namespace.clone())
+                                .or_else(|| local_meta.as_ref().map(|m| m.metadata.namespace.clone()));
+
                             // Check if game requires ownership token
                             let requires_ot = local_meta.as_ref()
                                 .and_then(|m| m.metadata.custom_attributes.as_ref())
@@ -1181,31 +1184,28 @@ impl LegendaryApp {
 
                             let mut ovt_path_opt = None;
 
-                            // Get ownership token if needed and not offline
-                            if requires_ot && !token.is_empty() {
-                                let lib_item = cached_library_items.iter().find(|i| i.app_name == app_name);
+                            // Get ownership token if needed (or available) and not offline
+                            if !offline {
                                 if let Some(item) = lib_item {
-                                    log::info!("Game requires ownership token, fetching...");
-                                    match client.get_ownership_token(&item.namespace, &item.catalog_item_id) {
-                                        Ok(ovt_bytes) => {
-                                            let ovt_path = std::env::temp_dir()
-                                                .join(format!("{}{}.ovt", item.namespace, item.catalog_item_id));
-                                            match std::fs::write(&ovt_path, &ovt_bytes) {
-                                                Ok(_) => {
-                                                    log::info!("Saved ownership token to {:?}", ovt_path);
-                                                    ovt_path_opt = Some(ovt_path);
-                                                }
-                                                Err(e) => {
-                                                    let _ = tx.send(WorkerResponse::Error(
-                                                        format!("Failed to save ownership token: {}", e)
-                                                    ));
-                                                    continue;
+                                    if requires_ot || app_name.to_lowercase().contains("hogwarts") {
+                                        log::info!("Fetching ownership token for {}...", app_name);
+                                        match client.get_ownership_token(&item.namespace, &item.catalog_item_id) {
+                                            Ok(ovt_bytes) => {
+                                                let ovt_path = std::env::temp_dir()
+                                                    .join(format!("{}{}.ovt", item.namespace, item.catalog_item_id));
+                                                match std::fs::write(&ovt_path, &ovt_bytes) {
+                                                    Ok(_) => {
+                                                        log::info!("Saved ownership token to {:?}", ovt_path);
+                                                        ovt_path_opt = Some(ovt_path);
+                                                    }
+                                                    Err(e) => {
+                                                        log::error!("Failed to save ownership token: {}", e);
+                                                    }
                                                 }
                                             }
-                                        }
-                                        Err(e) => {
-                                            log::warn!("Failed to get ownership token: {}. Continuing without it...", e);
-                                            // Don't fail - some games might work without it
+                                            Err(e) => {
+                                                log::warn!("Failed to get ownership token: {}. Continuing without it...", e);
+                                            }
                                         }
                                     }
                                 }
@@ -1349,6 +1349,13 @@ impl LegendaryApp {
                                 cmd.arg("-epicenv=Prod");
                                 cmd.arg("-EpicPortal");
                                 cmd.arg(format!("-epicuserid={}", user_id));
+                                if let Some(dn) = &display_name {
+                                    cmd.arg(format!("-epicusername={}", dn));
+                                }
+                                if let Some(ns) = &namespace {
+                                    cmd.arg(format!("-epicsandboxid={}", ns));
+                                }
+                                cmd.arg(format!("-uid={}", user_id));
                                 cmd.arg("-epiclocale=en");
 
                                 if let Some(ovt_path) = &ovt_path_opt {
@@ -1365,6 +1372,16 @@ impl LegendaryApp {
                                 if !overlay_enabled || !eos_installed {
                                     cmd.env("EOS_OVERLAY_KILLED", "1");
                                 }
+
+                                if !offline {
+                                    cmd.env("EPIC_AUTH_PASSWORD", &token);
+                                    cmd.env("EPIC_AUTH_LOGIN", "unused");
+                                    cmd.env("EPIC_AUTH_TYPE", "exchangecode");
+                                    cmd.env("EPIC_USER_ID", &user_id);
+                                    cmd.env("EPIC_ACCOUNT_ID", &user_id);
+                                }
+                                cmd.env("EpicApp", &app_name);
+                                cmd.env("EpicEnv", "Prod");
 
                                 // Additional environment variables and parameters...
                                 if let Some(val) = game_settings.and_then(|s| s.steam_compat_install_path.as_ref())
@@ -1600,9 +1617,6 @@ impl eframe::App for LegendaryApp {
                     }
                     self.installed_games = games;
                 }
-                WorkerResponse::GameTokenFetched { app_name, token, user_id } => {
-                    self.launch_game_with_token(app_name, token, user_id);
-                }
                 WorkerResponse::FilesListed(files) => {
                     self.manifest_files = files;
                 }
@@ -1682,8 +1696,8 @@ impl eframe::App for LegendaryApp {
 }
 
 impl LegendaryApp {
-    fn launch_game_with_token(&mut self, app_name: String, token: String, user_id: String) {
-        let _ = self.tx.send(WorkerMsg::LaunchGame { app_name, token, user_id });
+    fn launch_game(&mut self, app_name: String, offline: bool) {
+        let _ = self.tx.send(WorkerMsg::LaunchGame { app_name, offline });
     }
 
     fn show_tasks_view(&mut self, ui: &mut egui::Ui) {
@@ -2306,11 +2320,8 @@ impl LegendaryApp {
                                     if !can_run_offline {
                                         self.status_message = "Warning: Game may not support offline mode.".to_string();
                                     }
-                                    self.launch_game_with_token(app_name.clone(), "".to_string(), "".to_string());
-                                } else {
-                                    let _ = self.tx.send(WorkerMsg::FetchGameToken(app_name.clone()));
-                                    self.status_message = "Fetching game token...".to_string();
                                 }
+                                self.launch_game(app_name.clone(), offline);
                             }
                         }
 
