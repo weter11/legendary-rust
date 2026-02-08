@@ -1077,10 +1077,13 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::LaunchGame { app_name, offline } => {
+                        println!("--- Launching Game: {} ---", app_name);
+                        println!("[1/7] Loading installed game metadata...");
                         let installed_games = crate::auth::load_installed_games();
                         let installed = installed_games.iter().find(|g| g.app_name == app_name).cloned();
 
                         if let Some(installed) = installed {
+                            println!("[2/7] Checking configuration and authentication...");
                             let local_meta = crate::auth::load_local_metadata(&app_name);
                             let path = std::path::PathBuf::from(&installed.install_path);
                             let config = AppConfig::load();
@@ -1100,6 +1103,7 @@ impl LegendaryApp {
                             let mut display_name = client.get_display_name();
 
                             if !offline {
+                                println!("      Fetching game token...");
                                 match client.get_game_token() {
                                     Ok(t) => {
                                         token = t;
@@ -1107,17 +1111,66 @@ impl LegendaryApp {
                                         display_name = client.get_display_name();
                                     }
                                     Err(e) => {
+                                        println!("ERROR: Failed to fetch game token: {}", e);
                                         let _ = tx.send(WorkerResponse::Error(format!("Failed to fetch game token: {}", e)));
                                         continue;
                                     }
                                 }
+                            } else {
+                                println!("      Launching in offline mode.");
                             }
 
                             if token == "0" && !can_run_offline {
+                                println!("ERROR: This game cannot run offline and no token was provided.");
                                 let _ = tx.send(WorkerResponse::Error(
                                     "This game cannot run offline and no token was provided".to_string()
                                 ));
                                 continue;
+                            }
+
+                            // [3/7] Cloud Save Sync
+                            let sync_enabled = game_settings.map(|s| s.cloud_sync_enabled).unwrap_or(true);
+                            if !offline && sync_enabled {
+                                println!("[3/7] Checking cloud saves...");
+                                if let (Some(token), Some(lib_item)) = (crate::auth::load_token().ok(), cached_library_items.iter().find(|i| i.app_name == app_name)) {
+                                    let save_path = game_settings.and_then(|s| s.save_path.clone());
+                                    if let Some(sp) = save_path {
+                                        let local_time = get_latest_local_save_time(&sp);
+                                        match client.get_cloud_save_metadata(&lib_item.namespace, &token.account_id, &app_name) {
+                                            Ok(files) => {
+                                                let mut remote_time = None;
+                                                for file in &files {
+                                                    if let Ok(dt) = DateTime::parse_from_rfc3339(&file.last_modified) {
+                                                        let dt_utc = dt.with_timezone(&Utc);
+                                                        if remote_time.is_none() || dt_utc > remote_time.unwrap() {
+                                                            remote_time = Some(dt_utc);
+                                                        }
+                                                    }
+                                                }
+
+                                                match (local_time, remote_time) {
+                                                    (Some(l), Some(r)) => {
+                                                        if l > r {
+                                                            println!("      Local save is newer. You might want to upload it.");
+                                                        } else if r > l {
+                                                            println!("      Cloud save is newer. You might want to download it.");
+                                                        } else {
+                                                            println!("      Cloud and local saves are in sync.");
+                                                        }
+                                                    }
+                                                    (None, Some(_)) => println!("      Cloud save found, but no local save."),
+                                                    (Some(_), None) => println!("      Local save found, but no cloud save."),
+                                                    (None, None) => println!("      No cloud or local saves found."),
+                                                }
+                                            }
+                                            Err(e) => println!("      Warning: Failed to fetch cloud save metadata: {}", e),
+                                        }
+                                    } else {
+                                        println!("      Save path not configured, skipping sync check.");
+                                    }
+                                }
+                            } else {
+                                println!("[3/7] Cloud sync skipped (offline or disabled).");
                             }
 
                             // Pre-launch command
@@ -1131,7 +1184,9 @@ impl LegendaryApp {
                                 None
                             };
 
+                            println!("[4/7] Running pre-launch command...");
                             if let Some(cmd_str) = pre_launch {
+                                println!("      Command: {}", cmd_str);
                                 log::info!("Running pre-launch command: {}", cmd_str);
                                 let mut parts = cmd_str.split_whitespace();
                                 if let Some(program) = parts.next() {
@@ -1142,22 +1197,30 @@ impl LegendaryApp {
                                     match child.spawn().and_then(|mut c| c.wait()) {
                                         Ok(status) => {
                                             if !status.success() {
+                                                println!("ERROR: Pre-launch command failed with status: {}", status);
                                                 log::error!("Pre-launch command failed with status: {}", status);
+                                            } else {
+                                                println!("      Pre-launch command finished successfully.");
                                             }
                                         }
                                         Err(e) => {
+                                            println!("ERROR: Failed to run pre-launch command: {}", e);
                                             log::error!("Failed to run pre-launch command: {}", e);
                                         }
                                     }
                                 }
+                            } else {
+                                println!("      No pre-launch command configured.");
                             }
 
+                            println!("[5/7] Searching for game executables...");
                             let custom_exe = game_settings.and_then(|s| s.custom_exe_path.clone());
 
                             let mut possible_exes = Vec::new();
 
                             // If custom exe is specified, use only that
                             if let Some(ce) = custom_exe {
+                                println!("      Using custom executable: {:?}", ce);
                                 possible_exes.push(ce);
                             } else {
                                 // Build list of possible executable names
@@ -1198,6 +1261,7 @@ impl LegendaryApp {
 
                                 // If still nothing found, scan the install directory for any .exe files
                                 if possible_exes.is_empty() {
+                                    println!("      No executables found using standard names, scanning directory...");
                                     log::warn!("No executables found using standard names, scanning directory...");
                                     if let Ok(entries) = std::fs::read_dir(&path) {
                                         for entry in entries.flatten() {
@@ -1224,12 +1288,14 @@ impl LegendaryApp {
                                 }
                             }
 
+                            println!("      Possible executables: {:?}", possible_exes);
                             log::info!("Possible executables: {:?}", possible_exes);
 
                             let lib_item = cached_library_items.iter().find(|i| i.app_name == app_name);
                             let namespace = lib_item.map(|i| i.namespace.clone())
                                 .or_else(|| local_meta.as_ref().map(|m| m.metadata.namespace.clone()));
 
+                            println!("[6/7] Handling ownership token and launch parameters...");
                             // Check if game requires ownership token
                             let mut requires_ot = local_meta.as_ref()
                                 .and_then(|m| m.metadata.custom_attributes.as_ref())
@@ -1255,6 +1321,7 @@ impl LegendaryApp {
                             if !offline {
                                 if let Some(item) = lib_item {
                                     if requires_ot {
+                                        println!("      Fetching ownership token...");
                                         log::info!("Fetching ownership token for {}...", app_name);
                                         match client.get_ownership_token(&item.namespace, &item.catalog_item_id) {
                                             Ok(ovt_bytes) => {
@@ -1262,15 +1329,18 @@ impl LegendaryApp {
                                                     .join(format!("{}{}.ovt", item.namespace, item.catalog_item_id));
                                                 match std::fs::write(&ovt_path, &ovt_bytes) {
                                                     Ok(_) => {
+                                                        println!("      Ownership token saved to {:?}", ovt_path);
                                                         log::info!("Saved ownership token to {:?}", ovt_path);
                                                         ovt_path_opt = Some(ovt_path);
                                                     }
                                                     Err(e) => {
+                                                        println!("ERROR: Failed to save ownership token: {}", e);
                                                         log::error!("Failed to save ownership token: {}", e);
                                                     }
                                                 }
                                             }
                                             Err(e) => {
+                                                println!("WARNING: Failed to get ownership token: {}. Continuing without it...", e);
                                                 log::warn!("Failed to get ownership token: {}. Continuing without it...", e);
                                             }
                                         }
@@ -1278,12 +1348,17 @@ impl LegendaryApp {
                                 }
                             }
 
+                            println!("[7/7] Launching game...");
+                            if possible_exes.is_empty() {
+                                println!("ERROR: No executables found for {}.", app_name);
+                            }
                             // Try each possible executable
                             'search: for exe_path in possible_exes {
                                 if !exe_path.exists() {
                                     continue;
                                 }
 
+                                println!("      Executable: {:?}", exe_path);
                                 log::info!("Trying to launch: {:?}", exe_path);
 
                                 let use_umu = game_settings.map(|s| s.use_umu).unwrap_or(config.global.use_umu);
@@ -1499,6 +1574,7 @@ impl LegendaryApp {
 
                                 match cmd.spawn() {
                                     Ok(child) => {
+                                        println!("SUCCESS: Game launched successfully!");
                                         let _ = tx.send(WorkerResponse::GameLaunched {
                                             app_name: app_name.clone(),
                                             child
@@ -1507,12 +1583,14 @@ impl LegendaryApp {
                                         break 'search;
                                     }
                                     Err(e) => {
+                                        println!("ERROR: Failed to launch game: {}", e);
                                         log::error!("Failed to spawn process for {:?}: {}", exe_path, e);
                                     }
                                 }
                             }
 
                             if !found {
+                                println!("ERROR: Failed to launch game {}: no executable found or all failed to start", app_name);
                                 let _ = tx.send(WorkerResponse::Error(
                                     format!("Could not find or launch executable in {}", installed.install_path)
                                 ));
