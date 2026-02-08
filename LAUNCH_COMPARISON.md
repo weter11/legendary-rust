@@ -51,7 +51,13 @@ Both implementations follow a similar high-level process to launch a game:
 *   **Rust**: Integrates EOS Overlay management directly into the background worker. It can automatically install/update the overlay and uses the `EOS_OVERLAY_KILLED` variable to enable/disable it based on user settings or presence.
 
 ### Authentication & Decryption
-*   **Python**: Includes `egl_crypt.py`, which implements AES decryption to read encrypted session data from the Epic Games Launcher. This allows the `--import` flag to transition a user's login from EGL to Legendary.
+*   **Python**: Includes `egl_crypt.py`, which implements AES decryption to read encrypted session data from the Epic Games Launcher.
+    *   **EGL Auth Import**: This feature (triggered by `legendary auth --import`) allows users to log in without manually copying an exchange code. It works by:
+        1.  Locating the EGL `Saved/Config/Windows/GameUserSettings.ini` (or equivalent in a Wine prefix).
+        2.  Reading the encrypted `RememberMe` data.
+        3.  Decrypting the data using AES and specific hardcoded keys.
+        4.  Extracting the stored **Refresh Token** to initiate a new session.
+        *Note: This process typically invalidates the session in the official Epic Games Launcher, logging it out.*
 *   **Rust**: Currently lacks any decryption logic. Since **EGL Auth Import** is not yet implemented (see Roadmap), the Rust version does not yet require the AES decryption routines found in the Python version. If this feature is implemented in the future, a Rust equivalent of `egl_crypt.py` will be necessary to handle Epic's encrypted configuration files.
 
 ## 4. Feature Gaps in Rust
