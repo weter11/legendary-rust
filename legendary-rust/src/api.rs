@@ -6,7 +6,7 @@ pub const UA_DEFAULT: &str = "UELauncher/11.0.1-14907503+++Portal+Release-Live W
 pub const UA_EGS: &str = "EpicGamesLauncher/14.0.8-22004686+++Portal+Release-Live";
 
 pub fn get_ua_for_app(app_name: &str) -> &'static str {
-    if app_name == "98bc04bc842e4906993fd6d6644ffb8d" {
+    if app_name == crate::eos::EOS_OVERLAY_APP_ID {
         UA_EGS
     } else {
         UA_DEFAULT

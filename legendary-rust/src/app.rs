@@ -521,7 +521,7 @@ impl LegendaryApp {
                                             match client.get_asset_manifest(&game.platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                                 Ok(manifest_info) => {
                                                     if let Some(url) = find_manifest_url(&manifest_info) {
-                                                        match client.download_manifest(&url, Some(&app_name)) {
+                                                        match client.download_manifest(&url, Some(app_name.as_str())) {
                                                             Ok(manifest_data) => {
                                                                 // Save manifest
                                                                 let mut manifest_path_saved = None;
@@ -750,7 +750,7 @@ impl LegendaryApp {
                             if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                 if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                     if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
-                                        if let Ok(manifest_data) = client.download_manifest(&url, Some(&app_name)) {
+                                        if let Ok(manifest_data) = client.download_manifest(&url, Some(app_name.as_str())) {
                                             if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
                                                 let mut tags = HashSet::new();
                                                 for file in manifest.files.values() {
@@ -840,7 +840,7 @@ impl LegendaryApp {
                                     match client.get_asset_manifest(&platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                         Ok(manifest_info) => {
                                             if let Some(url) = find_manifest_url(&manifest_info) {
-                                                match client.download_manifest(&url, Some(&app_name)) {
+                                                match client.download_manifest(&url, Some(app_name.as_str())) {
                                                     Ok(data) => {
                                                         // Save manifest
                                                         if let Some(mut p) = crate::auth::get_config_dir() {
@@ -979,7 +979,7 @@ impl LegendaryApp {
                                     if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                         if let Ok(manifest_info) = client.get_asset_manifest(platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                             if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
-                                                if let Ok(manifest_data) = client.download_manifest(&url, Some(&app_name)) {
+                                                if let Ok(manifest_data) = client.download_manifest(&url, Some(app_name.as_str())) {
                                                     manifest_opt = crate::manifest::parse_manifest(&manifest_data).ok();
                                                     if manifest_opt.is_some() { break; }
                                                 }
