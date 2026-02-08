@@ -50,6 +50,10 @@ Both implementations follow a similar high-level process to launch a game:
 *   **Python**: Manages the EOS Overlay primarily through Windows registry entries or the `EOS_OVERLAY_KILLED` environment variable.
 *   **Rust**: Integrates EOS Overlay management directly into the background worker. It can automatically install/update the overlay and uses the `EOS_OVERLAY_KILLED` variable to enable/disable it based on user settings or presence.
 
+### Authentication & Decryption
+*   **Python**: Includes `egl_crypt.py`, which implements AES decryption to read encrypted session data from the Epic Games Launcher. This allows the `--import` flag to transition a user's login from EGL to Legendary.
+*   **Rust**: Currently lacks any decryption logic. Since **EGL Auth Import** is not yet implemented (see Roadmap), the Rust version does not yet require the AES decryption routines found in the Python version. If this feature is implemented in the future, a Rust equivalent of `egl_crypt.py` will be necessary to handle Epic's encrypted configuration files.
+
 ## 4. Feature Gaps in Rust
 
 While the Rust implementation offers a modern GUI and streamlined launch flow, several features from the original Python version are still missing:
