@@ -11,6 +11,7 @@ This document compares the game launch implementation in the original Python ver
 *   `legendary/api/egs.py`: Handles API requests to Epic Games Services, such as obtaining exchange codes and ownership tokens.
 *   `legendary/lfs/crossover.py`: Provides helper functions for detecting and configuring CrossOver on macOS.
 *   `legendary/utils/env.py`: Manages platform-specific environment variables and detection.
+*   `legendary/utils/egl_crypt.py`: Implements AES decryption used for importing and reading encrypted Epic Games Launcher user data/sessions.
 
 ### Rust (`legendary-rust`)
 *   `legendary-rust/src/app.rs`: The central background worker that processes `LaunchGame` messages and executes the actual system process.
