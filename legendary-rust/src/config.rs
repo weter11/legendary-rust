@@ -25,6 +25,10 @@ pub struct GlobalSettings {
     #[serde(default = "default_store")]
     pub umu_store: String,
     #[serde(default)]
+    pub use_fake_epic_exe: bool,
+    #[serde(default)]
+    pub fake_epic_exe_path: Option<PathBuf>,
+    #[serde(default)]
     pub steam_compat_install_path: Option<PathBuf>,
     #[serde(default)]
     pub steam_compat_client_install_path: Option<PathBuf>,
@@ -48,6 +52,8 @@ impl Default for GlobalSettings {
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
             umu_store: default_store(),
+            use_fake_epic_exe: false,
+            fake_epic_exe_path: None,
             steam_compat_install_path: None,
             steam_compat_client_install_path: None,
             steam_compat_data_path: None,
@@ -81,6 +87,10 @@ pub struct GameSettings {
     #[serde(default)]
     pub umu_store: Option<String>,
     #[serde(default)]
+    pub use_fake_epic_exe: bool,
+    #[serde(default)]
+    pub fake_epic_exe_path: Option<PathBuf>,
+    #[serde(default)]
     pub steam_compat_install_path: Option<PathBuf>,
     #[serde(default)]
     pub steam_compat_client_install_path: Option<PathBuf>,
@@ -110,6 +120,8 @@ impl Default for GameSettings {
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
             umu_store: None,
+            use_fake_epic_exe: false,
+            fake_epic_exe_path: None,
             steam_compat_install_path: None,
             steam_compat_client_install_path: None,
             steam_compat_data_path: None,

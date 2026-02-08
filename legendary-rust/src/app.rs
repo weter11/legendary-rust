@@ -1178,6 +1178,42 @@ impl LegendaryApp {
                                         std::process::Command::new(exe_path)
                                     };
 
+                                    // Fake Epic EXE logic
+                                    let use_fake_exe = game_settings.map(|s| s.use_fake_epic_exe).unwrap_or(config.global.use_fake_epic_exe);
+                                    let fake_exe_path = game_settings.and_then(|s| s.fake_epic_exe_path.clone()).or_else(|| config.global.fake_epic_exe_path.clone());
+
+                                    if use_fake_exe {
+                                        if let Some(src_path) = fake_exe_path {
+                                            if src_path.exists() {
+                                                cmd.env("USE_FAKE_EPIC_EXE", "1");
+                                                if std::env::consts::OS == "windows" {
+                                                    cmd.env("LEGENDARY_WRAPPER_EXE", &src_path);
+                                                } else {
+                                                    // Linux/Mac: Copy to prefix and set env
+                                                    let pfx_path = if let Some(gs) = game_settings {
+                                                        if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                        else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
+                                                        else { get_default_compat_data_path() }
+                                                    } else if config.global.use_custom_pfx {
+                                                        config.global.custom_pfx_path.clone()
+                                                    } else {
+                                                        get_default_compat_data_path()
+                                                    };
+
+                                                    if let Some(mut p) = pfx_path {
+                                                        p.push("drive_c/windows/command");
+                                                        let _ = std::fs::create_dir_all(&p);
+                                                        p.push("EpicGamesLauncher.exe");
+                                                        if !p.exists() {
+                                                            let _ = std::fs::copy(&src_path, &p);
+                                                        }
+                                                        cmd.env("LEGENDARY_WRAPPER_EXE", "C:\\windows\\command\\EpicGamesLauncher.exe");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     // Epic arguments
                                     cmd.arg("-AUTH_LOGIN=unused");
                                     cmd.arg(format!("-AUTH_PASSWORD={}", token));
@@ -1850,7 +1886,7 @@ impl LegendaryApp {
                             }
                             Some(CompatibilityTool::UmuLauncher) => {
                                 ui.horizontal(|ui| {
-                                    ui.label("UMU Store:");
+                                    ui.label("UMU ID (e.g. egs):");
                                     let mut store_str = game_settings.umu_store.clone().unwrap_or_default();
                                     if ui.text_edit_singleline(&mut store_str).changed() {
                                         game_settings.umu_store = if store_str.is_empty() { None } else { Some(store_str) };
@@ -1860,6 +1896,24 @@ impl LegendaryApp {
                             }
                             _ => {}
                         }
+                        ui.checkbox(&mut game_settings.use_fake_epic_exe, "Use Fake Epic Games Launcher");
+                        if game_settings.use_fake_epic_exe {
+                            ui.horizontal(|ui| {
+                                ui.label("Fake EXE Path:");
+                                let mut path_str = game_settings.fake_epic_exe_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                                if ui.text_edit_singleline(&mut path_str).changed() {
+                                    game_settings.fake_epic_exe_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                                    changed = true;
+                                }
+                                if ui.button("Browse...").clicked() {
+                                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                        game_settings.fake_epic_exe_path = Some(path);
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        }
+
                         if changed {
                             let _ = self.config.save();
                         }
@@ -2542,9 +2596,27 @@ impl LegendaryApp {
 
             if self.config.global.compatibility_tool == Some(CompatibilityTool::UmuLauncher) {
                 ui.horizontal(|ui| {
-                    ui.label("Default UMU Store:");
+                    ui.label("Default UMU ID (e.g. egs):");
                     if ui.text_edit_singleline(&mut self.config.global.umu_store).changed() {
                         changed = true;
+                    }
+                });
+            }
+
+            ui.checkbox(&mut self.config.global.use_fake_epic_exe, "Use Fake Epic Games Launcher by default");
+            if self.config.global.use_fake_epic_exe {
+                ui.horizontal(|ui| {
+                    ui.label("Global Fake EXE Path:");
+                    let mut path_str = self.config.global.fake_epic_exe_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                    if ui.text_edit_singleline(&mut path_str).changed() {
+                        self.config.global.fake_epic_exe_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                        changed = true;
+                    }
+                    if ui.button("Browse...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_file() {
+                            self.config.global.fake_epic_exe_path = Some(path);
+                            changed = true;
+                        }
                     }
                 });
             }
