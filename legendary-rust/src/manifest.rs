@@ -5,10 +5,19 @@ use std::collections::HashMap;
 
 pub struct Manifest {
     pub manifest_version: u32,
+    pub meta: ManifestMeta,
     pub chunks: HashMap<[u32; 4], ChunkInfo>,
     pub files: HashMap<String, FileManifest>,
     pub total_uncompressed_size: u64,
     pub total_download_size: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ManifestMeta {
+    pub app_name: String,
+    pub build_version: String,
+    pub launch_exe: String,
+    pub launch_command: String,
 }
 
 impl Manifest {
@@ -93,8 +102,26 @@ pub fn parse_manifest(data: &[u8]) -> anyhow::Result<Manifest> {
     let mut body_cursor = Cursor::new(body_data);
 
     // Parse Meta
+    let meta_start = body_cursor.position();
     let meta_size = body_cursor.read_u32::<LittleEndian>()?;
-    body_cursor.seek(SeekFrom::Current(meta_size as i64 - 4))?;
+    let data_version = body_cursor.read_u8()?;
+    let _feature_level = body_cursor.read_u32::<LittleEndian>()?;
+    let _is_file_data = body_cursor.read_u8()?;
+    let _app_id = body_cursor.read_u32::<LittleEndian>()?;
+
+    let meta_app_name = read_fstring(&mut body_cursor)?;
+    let build_version = read_fstring(&mut body_cursor)?;
+    let launch_exe = read_fstring(&mut body_cursor)?;
+    let launch_command = read_fstring(&mut body_cursor)?;
+
+    let meta = ManifestMeta {
+        app_name: meta_app_name,
+        build_version,
+        launch_exe,
+        launch_command,
+    };
+
+    body_cursor.seek(SeekFrom::Start(meta_start + meta_size as u64))?;
 
     // Parse CDL (Chunk Data List)
     let _cdl_start = body_cursor.position();
@@ -225,7 +252,7 @@ pub fn parse_manifest(data: &[u8]) -> anyhow::Result<Manifest> {
     let total_uncompressed_size = files.values().map(|f| f.file_size).sum();
     let total_download_size = chunks.values().map(|c| c.file_size as u64).sum();
 
-    Ok(Manifest { manifest_version, chunks, files, total_uncompressed_size, total_download_size })
+    Ok(Manifest { manifest_version, meta, chunks, files, total_uncompressed_size, total_download_size })
 }
 
 fn read_fstring<R: Read>(mut reader: R) -> anyhow::Result<String> {

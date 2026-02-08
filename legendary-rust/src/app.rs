@@ -897,10 +897,12 @@ impl LegendaryApp {
                         }
 
                         let mut success = false;
+                        let mut executable = String::new();
                         if let (Some(manifest_data), Some(base_url)) = (manifest_data_opt, base_url_opt) {
                             if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
                                 install_size = manifest.total_uncompressed_size;
                                 download_size = manifest.total_download_size;
+                                executable = manifest.meta.launch_exe.clone();
                                 let user_agent = crate::api::get_ua_for_app(&app_name).to_string();
                                 let downloader = crate::download::Downloader::new(base_url, user_agent, tx.clone(), cancel.clone(), pause.clone());
                                 match downloader.download_game(&manifest, &install_path, selected_tags) {
@@ -928,6 +930,7 @@ impl LegendaryApp {
                                 install_path: install_path.to_string_lossy().to_string(),
                                 title: title.clone(),
                                 version,
+                                executable,
                                 install_size,
                                 download_size,
                                 platform: platform.clone(),
@@ -1101,6 +1104,10 @@ impl LegendaryApp {
                             if let Some(ce) = custom_exe {
                                 possible_exes.push(ce);
                             } else {
+                                if !installed.executable.is_empty() {
+                                    possible_exes.push(path.join(installed.executable.replace('\\', "/").trim_start_matches('/')));
+                                }
+
                                 let mut possible_names = vec![app_name.clone()];
                                 if let Some(meta) = &local_meta {
                                     if let Some(attrs) = &meta.metadata.custom_attributes {

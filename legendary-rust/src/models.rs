@@ -83,6 +83,8 @@ pub struct InstalledGame {
     pub title: String,
     pub version: String,
     #[serde(default)]
+    pub executable: String,
+    #[serde(default)]
     pub install_size: u64,
     #[serde(default)]
     pub download_size: u64,

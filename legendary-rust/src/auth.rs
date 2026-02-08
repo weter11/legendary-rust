@@ -130,6 +130,7 @@ pub fn scan_egl_manifests() -> Vec<crate::models::InstalledGame> {
                             let install_path = egl_manifest["InstallLocation"].as_str().unwrap_or_default().to_string();
                             let title = egl_manifest["DisplayName"].as_str().unwrap_or_default().to_string();
                             let version = egl_manifest["AppVersionString"].as_str().unwrap_or_default().to_string();
+                            let executable = egl_manifest["LaunchExecutable"].as_str().unwrap_or_default().to_string();
 
                             if !install_path.is_empty() && std::path::Path::new(&install_path).exists() {
                                 let new_game = crate::models::InstalledGame {
@@ -137,6 +138,7 @@ pub fn scan_egl_manifests() -> Vec<crate::models::InstalledGame> {
                                     install_path,
                                     title,
                                     version,
+                                    executable,
                                     install_size: 0, // Will be calculated on load
                                     download_size: 0,
                                     platform: "Windows".to_string(),
@@ -196,13 +198,26 @@ pub fn scan_and_import_games(library: &[crate::models::LibraryItem], search_path
                                     .map(|m| m.app_title.clone())
                                     .unwrap_or_else(|| item.app_name.clone());
 
-                                let manifest_path = get_manifest_path(&item.app_name, &item.catalog_item_id)
+                                let manifest_path_buf = get_manifest_path(&item.app_name, &item.catalog_item_id);
+                                let mut executable = String::new();
+                                let mut version = "0.0.0".to_string();
+                                if let Some(ref mp) = manifest_path_buf {
+                                    if let Ok(data) = std::fs::read(mp) {
+                                        if let Ok(manifest) = crate::manifest::parse_manifest(&data) {
+                                            executable = manifest.meta.launch_exe;
+                                            version = manifest.meta.build_version;
+                                        }
+                                    }
+                                }
+
+                                let manifest_path = manifest_path_buf
                                     .map(|p| p.to_string_lossy().to_string());
                                 let new_game = crate::models::InstalledGame {
                                     app_name: item.app_name.clone(),
                                     install_path: entry.path().to_string_lossy().to_string(),
                                     title,
-                                    version: "0.0.0".to_string(), // Placeholder, might need better way to get version
+                                    version,
+                                    executable,
                                     install_size: get_dir_size(&entry.path()),
                                     download_size: 0,
                                     platform: "Windows".to_string(),

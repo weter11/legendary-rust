@@ -87,4 +87,17 @@ mod tests {
         assert_eq!(attrs.get("CanRunOffline").unwrap().value, "true");
         assert_eq!(attrs.get("OwnershipToken").unwrap().value, "true");
     }
+
+    #[test]
+    fn test_installed_game_executable_deserialization() {
+        let json = r#"{
+            "app_name": "HogwartsLegacy",
+            "install_path": "C:/Games/HogwartsLegacy",
+            "title": "Hogwarts Legacy",
+            "version": "1.0.0",
+            "executable": "Phoenix/Binaries/Win64/HogwartsLegacy.exe"
+        }"#;
+        let game: InstalledGame = serde_json::from_str(json).unwrap();
+        assert_eq!(game.executable, "Phoenix/Binaries/Win64/HogwartsLegacy.exe");
+    }
 }
