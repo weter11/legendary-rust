@@ -2,7 +2,24 @@
 
 This document compares the game launch implementation in the original Python version of Legendary and the new Rust-based reimplementation.
 
-## 1. Launch Process Overview
+## 1. Relevant Files
+
+### Python (`legendary`)
+*   `legendary/core.py`: Contains the core logic for constructing launch commands, resolving executables, and preparing the environment.
+*   `legendary/cli.py`: The entry point for the `launch` command, handling CLI arguments and user interactions.
+*   `legendary/models/game.py`: Defines the `LaunchParameters` structure used to pass data between the CLI and core logic.
+*   `legendary/api/egs.py`: Handles API requests to Epic Games Services, such as obtaining exchange codes and ownership tokens.
+*   `legendary/lfs/crossover.py`: Provides helper functions for detecting and configuring CrossOver on macOS.
+*   `legendary/utils/env.py`: Manages platform-specific environment variables and detection.
+
+### Rust (`legendary-rust`)
+*   `legendary-rust/src/app.rs`: The central background worker that processes `LaunchGame` messages and executes the actual system process.
+*   `legendary-rust/src/api.rs`: The `EgsClient` implementation for fetching authentication tokens and ownership validation files.
+*   `legendary-rust/src/config.rs`: Handles loading and merging global and game-specific launch configurations (e.g., start parameters, compatibility tools).
+*   `legendary-rust/src/eos.rs`: Manages detection and registry integration for the EOS Overlay.
+*   `legendary-rust/src/models.rs`: Contains the data models for local metadata and installed game information used during launch.
+
+## 2. Launch Process Overview
 
 Both implementations follow a similar high-level process to launch a game:
 1.  **Resolve Executable**: Determine the path to the game binary.
@@ -11,7 +28,7 @@ Both implementations follow a similar high-level process to launch a game:
 4.  **Construct Command**: Build the command line with standard Epic Games Launcher (EGL) arguments and environment variables.
 5.  **Execution**: Launch the process, optionally using compatibility tools (Wine, Proton, etc.).
 
-## 2. Key Technical Differences
+## 3. Key Technical Differences
 
 ### Executable Detection
 *   **Python (`legendary`)**: Primarily relies on the `executable` path provided in the game metadata/manifest. Allows a manual override via the `override_exe` configuration option.
@@ -32,7 +49,7 @@ Both implementations follow a similar high-level process to launch a game:
 *   **Python**: Manages the EOS Overlay primarily through Windows registry entries or the `EOS_OVERLAY_KILLED` environment variable.
 *   **Rust**: Integrates EOS Overlay management directly into the background worker. It can automatically install/update the overlay and uses the `EOS_OVERLAY_KILLED` variable to enable/disable it based on user settings or presence.
 
-## 3. Feature Gaps in Rust
+## 4. Feature Gaps in Rust
 
 While the Rust implementation offers a modern GUI and streamlined launch flow, several features from the original Python version are still missing:
 
@@ -49,6 +66,6 @@ While the Rust implementation offers a modern GUI and streamlined launch flow, s
 | **Detailed Info** | `legendary info ...` | Basic view only |
 | **Export Formats** | CSV/JSON/TSV output | Missing |
 
-## 4. Conclusion
+## 5. Conclusion
 
 The Rust reimplementation (`legendary-rust`) provides a more "intelligent" launch experience, particularly for Linux users, through its advanced executable searching and native UMU/Proton integration. However, the original Python version remains more feature-complete regarding third-party store integrations (EA, Ubisoft) and advanced management utilities (aliases, game moving, EGL session import).
