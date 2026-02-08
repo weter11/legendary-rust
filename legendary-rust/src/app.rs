@@ -124,6 +124,7 @@ pub(crate) enum WorkerMsg {
     LaunchGame {
         app_name: String,
         token: String,
+        user_id: String,
     },
     QueryEosStatus {
         prefix: Option<std::path::PathBuf>,
@@ -166,6 +167,7 @@ pub(crate) enum WorkerResponse {
     GameTokenFetched {
         app_name: String,
         token: String,
+        user_id: String,
     },
     FilesListed(Vec<String>),
     GameLaunched {
@@ -972,7 +974,8 @@ impl LegendaryApp {
                     WorkerMsg::FetchGameToken(app_name) => {
                         match client.get_game_token() {
                             Ok(token) => {
-                                let _ = tx.send(WorkerResponse::GameTokenFetched { app_name, token });
+                                let user_id = client.get_account_id().unwrap_or_default();
+                                let _ = tx.send(WorkerResponse::GameTokenFetched { app_name, token, user_id });
                             }
                             Err(e) => {
                                 let _ = tx.send(WorkerResponse::Error(format!("Failed to fetch game token: {}", e)));
@@ -1029,7 +1032,7 @@ impl LegendaryApp {
                         }
                         ctx_clone.request_repaint();
                     }
-                    WorkerMsg::LaunchGame { app_name, token } => {
+                    WorkerMsg::LaunchGame { app_name, token, user_id } => {
                         let installed_games = crate::auth::load_installed_games();
                         let installed = installed_games.iter().find(|g| g.app_name == app_name).cloned();
                         if let Some(installed) = installed {
@@ -1218,6 +1221,9 @@ impl LegendaryApp {
                                     cmd.arg("-AUTH_TYPE=exchangecode");
                                     cmd.arg(format!("-epicapp={}", app_name));
                                     cmd.arg("-epicenv=Prod");
+                                    cmd.arg("-EpicPortal");
+                                    cmd.arg(format!("-epicuserid={}", user_id));
+                                    cmd.arg("-epiclocale=en");
 
                                     let overlay_enabled = if let Some(gs) = game_settings {
                                         gs.eos_overlay_enabled
@@ -1451,8 +1457,8 @@ impl eframe::App for LegendaryApp {
                     }
                     self.installed_games = games;
                 }
-                WorkerResponse::GameTokenFetched { app_name, token } => {
-                    self.launch_game_with_token(app_name, token);
+                WorkerResponse::GameTokenFetched { app_name, token, user_id } => {
+                    self.launch_game_with_token(app_name, token, user_id);
                 }
                 WorkerResponse::FilesListed(files) => {
                     self.manifest_files = files;
@@ -1533,8 +1539,8 @@ impl eframe::App for LegendaryApp {
 }
 
 impl LegendaryApp {
-    fn launch_game_with_token(&mut self, app_name: String, token: String) {
-        let _ = self.tx.send(WorkerMsg::LaunchGame { app_name, token });
+    fn launch_game_with_token(&mut self, app_name: String, token: String, user_id: String) {
+        let _ = self.tx.send(WorkerMsg::LaunchGame { app_name, token, user_id });
     }
 
     fn show_tasks_view(&mut self, ui: &mut egui::Ui) {
@@ -2157,7 +2163,7 @@ impl LegendaryApp {
                                     if !can_run_offline {
                                         self.status_message = "Warning: Game may not support offline mode.".to_string();
                                     }
-                                    self.launch_game_with_token(app_name.clone(), "".to_string());
+                                    self.launch_game_with_token(app_name.clone(), "".to_string(), "".to_string());
                                 } else {
                                     let _ = self.tx.send(WorkerMsg::FetchGameToken(app_name.clone()));
                                     self.status_message = "Fetching game token...".to_string();
