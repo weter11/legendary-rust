@@ -42,6 +42,7 @@ pub struct LegendaryApp {
     current_task: Option<TaskStatus>,
     manifest_files: Vec<String>,
     manifest_search_query: String,
+    eos_status: crate::eos::EosOverlayStatus,
 }
 
 #[derive(Clone)]
@@ -124,6 +125,14 @@ pub(crate) enum WorkerMsg {
         app_name: String,
         token: String,
     },
+    QueryEosStatus {
+        prefix: Option<std::path::PathBuf>,
+    },
+    UpdateEosRegistry {
+        overlay_path: String,
+        prefix: std::path::PathBuf,
+        enable: bool,
+    },
 }
 
 pub(crate) enum WorkerResponse {
@@ -163,6 +172,7 @@ pub(crate) enum WorkerResponse {
         app_name: String,
         child: std::process::Child,
     },
+    EosStatusFetched(crate::eos::EosOverlayStatus),
 }
 
 #[derive(PartialEq)]
@@ -1242,6 +1252,53 @@ impl LegendaryApp {
                             }
                         }
                     }
+                    WorkerMsg::QueryEosStatus { prefix } => {
+                        let installed_games = crate::auth::load_installed_games();
+                        let eos_installed = installed_games.iter().find(|g| g.app_name == crate::eos::EOS_OVERLAY_APP_ID);
+
+                        let mut status = crate::eos::EosOverlayStatus {
+                            installed: eos_installed.is_some(),
+                            install_path: eos_installed.map(|g| g.install_path.clone()),
+                            registry_path: None,
+                            available_paths: Vec::new(),
+                        };
+
+                        let pref = prefix.or_else(get_default_compat_data_path);
+
+                        if let Some(p) = pref {
+                            status.registry_path = crate::eos::query_registry(&p);
+                            status.available_paths = crate::eos::search_overlay_installs(Some(&p));
+                        }
+
+                        let _ = tx.send(WorkerResponse::EosStatusFetched(status));
+                        ctx_clone.request_repaint();
+                    }
+                    WorkerMsg::UpdateEosRegistry { overlay_path, prefix, enable } => {
+                        let res = if enable {
+                            crate::eos::add_registry_entries(&overlay_path, &prefix)
+                        } else {
+                            crate::eos::remove_registry_entries(&prefix)
+                        };
+
+                        if let Err(e) = res {
+                            let _ = tx.send(WorkerResponse::Error(format!("Failed to update registry: {}", e)));
+                        } else {
+                            let msg = if enable { "EOS Registry updated" } else { "EOS Registry entries removed" };
+                            let _ = tx.send(WorkerResponse::TaskFinished(msg.to_string()));
+
+                            // Re-query status
+                            let installed_games = crate::auth::load_installed_games();
+                            let eos_installed = installed_games.iter().find(|g| g.app_name == crate::eos::EOS_OVERLAY_APP_ID);
+                            let status = crate::eos::EosOverlayStatus {
+                                installed: eos_installed.is_some(),
+                                install_path: eos_installed.map(|g| g.install_path.clone()),
+                                registry_path: crate::eos::query_registry(&prefix),
+                                available_paths: crate::eos::search_overlay_installs(Some(&prefix)),
+                            };
+                            let _ = tx.send(WorkerResponse::EosStatusFetched(status));
+                        }
+                        ctx_clone.request_repaint();
+                    }
                 }
             }
         });
@@ -1271,6 +1328,7 @@ impl LegendaryApp {
             current_task: None,
             manifest_files: Vec::new(),
             manifest_search_query: String::new(),
+            eos_status: crate::eos::EosOverlayStatus::default(),
         }
     }
 }
@@ -1371,6 +1429,9 @@ impl eframe::App for LegendaryApp {
                 WorkerResponse::GameLaunched { app_name, child } => {
                     self.running_processes.insert(app_name, child);
                 }
+                WorkerResponse::EosStatusFetched(status) => {
+                    self.eos_status = status;
+                }
             }
         }
 
@@ -1394,6 +1455,7 @@ impl eframe::App for LegendaryApp {
             }
             if ui.selectable_label(self.current_view == View::EosOverlay, "EOS Overlay").clicked() {
                 self.current_view = View::EosOverlay;
+                let _ = self.tx.send(WorkerMsg::QueryEosStatus { prefix: None });
             }
             if self.token.is_some() {
                 if ui.selectable_label(self.current_view == View::Account, "Account").clicked() {
@@ -2466,6 +2528,91 @@ impl LegendaryApp {
         ui.separator();
 
         ui.group(|ui| {
+            ui.heading("Status");
+            ui.horizontal(|ui| {
+                ui.label("Installed:");
+                if self.eos_status.installed {
+                    ui.colored_label(egui::Color32::GREEN, "YES");
+                } else {
+                    ui.colored_label(egui::Color32::RED, "NO");
+                }
+            });
+
+            if let Some(path) = &self.eos_status.install_path {
+                ui.label(format!("Install Path: {}", path));
+            } else {
+                if ui.button("Install EOS Overlay").clicked() {
+                    if let Some(home) = home::home_dir() {
+                        let mut p = home;
+                        p.push("Games");
+                        p.push("eos-overlay");
+                        let _ = self.tx.send(WorkerMsg::InstallGame {
+                            app_name: crate::eos::EOS_OVERLAY_APP_ID.to_string(),
+                            install_path: p,
+                            selected_tags: None,
+                            platform: "Windows".to_string()
+                        });
+                        self.current_view = View::Tasks;
+                    }
+                }
+            }
+
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                ui.label("Registry Status (Default Prefix):");
+                if let Some(reg_path) = &self.eos_status.registry_path {
+                    ui.colored_label(egui::Color32::GREEN, format!("Configured ({})", reg_path));
+                } else {
+                    ui.colored_label(egui::Color32::YELLOW, "Not Configured");
+                }
+            });
+
+            if !self.eos_status.available_paths.is_empty() {
+                ui.add_space(5.0);
+                ui.label("Other available EOS installs:");
+                for path in &self.eos_status.available_paths {
+                    ui.horizontal(|ui| {
+                        ui.label(path);
+                        if ui.button("Use this").clicked() {
+                            if let Some(prefix) = get_default_compat_data_path() {
+                                let _ = self.tx.send(WorkerMsg::UpdateEosRegistry {
+                                    overlay_path: path.clone(),
+                                    prefix,
+                                    enable: true
+                                });
+                            }
+                        }
+                    });
+                }
+            }
+
+            if self.eos_status.installed {
+                ui.horizontal(|ui| {
+                    if ui.button("Enable in Default Prefix").clicked() {
+                        if let (Some(path), Some(prefix)) = (&self.eos_status.install_path, get_default_compat_data_path()) {
+                            let _ = self.tx.send(WorkerMsg::UpdateEosRegistry {
+                                overlay_path: path.clone(),
+                                prefix,
+                                enable: true
+                            });
+                        }
+                    }
+                    if ui.button("Disable in Default Prefix").clicked() {
+                        if let Some(prefix) = get_default_compat_data_path() {
+                            let _ = self.tx.send(WorkerMsg::UpdateEosRegistry {
+                                overlay_path: String::new(),
+                                prefix,
+                                enable: false
+                            });
+                        }
+                    }
+                });
+            }
+        });
+
+        ui.add_space(20.0);
+
+        ui.group(|ui| {
             ui.label("Global EOS Overlay Setting:");
             if ui.checkbox(&mut self.config.global.eos_overlay_enabled, "Enable EOS Overlay by default").changed() {
                 let _ = self.config.save();
@@ -2476,6 +2623,7 @@ impl LegendaryApp {
         ui.heading("Per-game EOS Overlay Settings");
         egui::ScrollArea::vertical().show(ui, |ui| {
             for game in &self.installed_games {
+                if game.app_name == crate::eos::EOS_OVERLAY_APP_ID { continue; }
                 ui.horizontal(|ui| {
                     ui.label(&game.title);
                     let settings = self.config.games.entry(game.app_name.clone()).or_default();
