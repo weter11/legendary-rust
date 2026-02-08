@@ -305,7 +305,6 @@ impl EgsClient {
 
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
-            .header(USER_AGENT, get_ua_for_app(app_name))
             .send()?;
 
         if !response.status().is_success() {
@@ -357,6 +356,7 @@ impl EgsClient {
 
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
+            .header(USER_AGENT, get_ua_for_app(app_name))
             .send()?;
 
         if !response.status().is_success() {
