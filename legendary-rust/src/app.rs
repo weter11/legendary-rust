@@ -521,7 +521,7 @@ impl LegendaryApp {
                                             match client.get_asset_manifest(&game.platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                                 Ok(manifest_info) => {
                                                     if let Some(url) = find_manifest_url(&manifest_info) {
-                                                        match client.download_manifest(&url) {
+                                                        match client.download_manifest(&url, Some(&app_name)) {
                                                             Ok(manifest_data) => {
                                                                 // Save manifest
                                                                 let mut manifest_path_saved = None;
@@ -750,7 +750,7 @@ impl LegendaryApp {
                             if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                 if let Ok(manifest_info) = client.get_asset_manifest("Windows", &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                     if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
-                                        if let Ok(manifest_data) = client.download_manifest(&url) {
+                                        if let Ok(manifest_data) = client.download_manifest(&url, Some(&app_name)) {
                                             if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
                                                 let mut tags = HashSet::new();
                                                 for file in manifest.files.values() {
@@ -840,7 +840,7 @@ impl LegendaryApp {
                                     match client.get_asset_manifest(&platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                         Ok(manifest_info) => {
                                             if let Some(url) = find_manifest_url(&manifest_info) {
-                                                match client.download_manifest(&url) {
+                                                match client.download_manifest(&url, Some(&app_name)) {
                                                     Ok(data) => {
                                                         // Save manifest
                                                         if let Some(mut p) = crate::auth::get_config_dir() {
@@ -874,7 +874,8 @@ impl LegendaryApp {
                             if let Ok(manifest) = crate::manifest::parse_manifest(&manifest_data) {
                                 install_size = manifest.total_uncompressed_size;
                                 download_size = manifest.total_download_size;
-                                let downloader = crate::download::Downloader::new(base_url, tx.clone(), cancel.clone(), pause.clone());
+                                let user_agent = crate::api::get_ua_for_app(&app_name).to_string();
+                                let downloader = crate::download::Downloader::new(base_url, user_agent, tx.clone(), cancel.clone(), pause.clone());
                                 match downloader.download_game(&manifest, &install_path, selected_tags) {
                                     Ok(_) => success = true,
                                     Err(e) => {
@@ -978,7 +979,7 @@ impl LegendaryApp {
                                     if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
                                         if let Ok(manifest_info) = client.get_asset_manifest(platform, &asset.namespace, &asset.catalog_item_id, &asset.app_name, &asset.label_name) {
                                             if let Some(url) = construct_manifest_url(&manifest_info["elements"][0]["manifests"][0]) {
-                                                if let Ok(manifest_data) = client.download_manifest(&url) {
+                                                if let Ok(manifest_data) = client.download_manifest(&url, Some(&app_name)) {
                                                     manifest_opt = crate::manifest::parse_manifest(&manifest_data).ok();
                                                     if manifest_opt.is_some() { break; }
                                                 }

@@ -2,6 +2,17 @@ use crate::models::*;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use anyhow::Result;
 
+pub const UA_DEFAULT: &str = "UELauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit";
+pub const UA_EGS: &str = "EpicGamesLauncher/14.0.8-22004686+++Portal+Release-Live";
+
+pub fn get_ua_for_app(app_name: &str) -> &'static str {
+    if app_name == "98bc04bc842e4906993fd6d6644ffb8d" {
+        UA_EGS
+    } else {
+        UA_DEFAULT
+    }
+}
+
 pub struct EgsClient {
     client: reqwest::blocking::Client,
     user_basic: String,
@@ -12,7 +23,7 @@ pub struct EgsClient {
 
 impl EgsClient {
     pub fn new() -> Result<Self> {
-        let user_agent = "UELauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit".to_string();
+        let user_agent = UA_DEFAULT.to_string();
         let user_basic = "34a02cf8f4414e29b15921876da36f9a".to_string();
         let pw_basic = "daafbccc737745039dffe53d94fc76cf".to_string();
 
@@ -173,8 +184,12 @@ impl EgsClient {
         Ok(assets)
     }
 
-    pub fn download_manifest(&self, url: &str) -> Result<Vec<u8>> {
-        let response = self.client.get(url).send()?;
+    pub fn download_manifest(&self, url: &str, app_name: Option<&str>) -> Result<Vec<u8>> {
+        let mut req = self.client.get(url);
+        if let Some(app) = app_name {
+            req = req.header(USER_AGENT, get_ua_for_app(app));
+        }
+        let response = req.send()?;
         if !response.status().is_success() {
             return Err(anyhow::anyhow!("Failed to download manifest: {}", response.status()));
         }
@@ -189,6 +204,7 @@ impl EgsClient {
 
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
+            .header(USER_AGENT, get_ua_for_app(app_name))
             .send()?;
 
         if !response.status().is_success() {
@@ -289,6 +305,7 @@ impl EgsClient {
 
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
+            .header(USER_AGENT, get_ua_for_app(app_name))
             .send()?;
 
         if !response.status().is_success() {
@@ -350,8 +367,8 @@ impl EgsClient {
         Ok(ticket)
     }
 
-    pub fn get_game_manifest_by_ticket(&self, manifest_url: &str) -> Result<Vec<u8>> {
-        self.download_manifest(manifest_url)
+    pub fn get_game_manifest_by_ticket(&self, manifest_url: &str, app_name: Option<&str>) -> Result<Vec<u8>> {
+        self.download_manifest(manifest_url, app_name)
     }
 
     pub fn start_session_with_sid(&mut self, sid: &str) -> Result<OAuthToken> {
