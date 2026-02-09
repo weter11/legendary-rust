@@ -53,6 +53,7 @@ pub struct LegendaryApp {
 #[derive(Clone, Default)]
 pub struct AdvancedInfo {
     pub save_path: Option<std::path::PathBuf>,
+    pub backup_path: Option<std::path::PathBuf>,
     pub prefix_path: Option<std::path::PathBuf>,
     pub dlss_path: Option<std::path::PathBuf>,
     pub dlssd_path: Option<std::path::PathBuf>,
@@ -73,6 +74,7 @@ pub struct SaveSyncStatus {
     pub files: Vec<crate::models::CloudSaveFile>,
     pub local_time: Option<DateTime<Utc>>,
     pub remote_time: Option<DateTime<Utc>>,
+    pub backup_time: Option<DateTime<Utc>>,
     pub loading: bool,
     pub error: Option<String>,
 }
@@ -110,6 +112,7 @@ pub(crate) enum WorkerMsg {
         app_name: String,
         namespace: String,
         save_path: Option<std::path::PathBuf>,
+        backup_path: Option<std::path::PathBuf>,
     },
     CheckEula(Vec<String>),
     AcceptEula {
@@ -160,6 +163,11 @@ pub(crate) enum WorkerMsg {
         prefix: std::path::PathBuf,
         enable: bool,
     },
+    CreateLocalBackup {
+        app_name: String,
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
 }
 
 pub(crate) enum WorkerResponse {
@@ -186,6 +194,7 @@ pub(crate) enum WorkerResponse {
         files: Vec<crate::models::CloudSaveFile>,
         local_time: Option<DateTime<Utc>>,
         remote_time: Option<DateTime<Utc>>,
+        backup_time: Option<DateTime<Utc>>,
         error: Option<String>,
     },
     EulaStatusFetched(Vec<serde_json::Value>),
@@ -771,7 +780,7 @@ impl LegendaryApp {
                             }
                         }
                     }
-                    WorkerMsg::SyncCloudSaves { app_name, namespace, save_path } => {
+                    WorkerMsg::SyncCloudSaves { app_name, namespace, save_path, backup_path } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Checking cloud saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                         println!("[CloudSaves] Checking saves for {}, namespace: {}", app_name, namespace);
                         if let Some(ref p) = save_path {
@@ -781,6 +790,7 @@ impl LegendaryApp {
                         }
 
                         let local_time = save_path.as_ref().and_then(|p| get_latest_local_save_time(p));
+                        let backup_time = backup_path.as_ref().and_then(|p| get_latest_local_save_time(p));
 
                         let result = if let Some(token) = crate::auth::load_token().ok() {
                             client.get_cloud_save_metadata(&namespace, &token.account_id, &app_name)
@@ -805,6 +815,7 @@ impl LegendaryApp {
                                     files,
                                     local_time,
                                     remote_time,
+                                    backup_time,
                                     error: None,
                                 });
                                 let _ = tx.send(WorkerResponse::TaskFinished(format!("Checked cloud saves for {}", app_name)));
@@ -815,9 +826,38 @@ impl LegendaryApp {
                                     files: Vec::new(),
                                     local_time,
                                     remote_time: None,
+                                    backup_time,
                                     error: Some(e.to_string()),
                                 });
                                 let _ = tx.send(WorkerResponse::Error(format!("Failed to check cloud saves for {}: {}", app_name, e)));
+                            }
+                        }
+                        ctx_clone.request_repaint();
+                    }
+                    WorkerMsg::CreateLocalBackup { app_name, source, destination } => {
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Creating backup for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
+
+                        // Use a more robust recursive copy
+                        fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+                            std::fs::create_dir_all(&dst)?;
+                            for entry in std::fs::read_dir(src)? {
+                                let entry = entry?;
+                                let ty = entry.file_type()?;
+                                if ty.is_dir() {
+                                    copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+                                } else {
+                                    std::fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
+                                }
+                            }
+                            Ok(())
+                        }
+
+                        match copy_dir_all(&source, &destination) {
+                            Ok(_) => {
+                                let _ = tx.send(WorkerResponse::TaskFinished(format!("Backup for {} complete", app_name)));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(WorkerResponse::Error(format!("Backup failed: {}", e)));
                             }
                         }
                         ctx_clone.request_repaint();
@@ -831,7 +871,7 @@ impl LegendaryApp {
                             for (i, file_path) in files.iter().enumerate() {
                                 if let Ok(data) = std::fs::read(file_path) {
                                     let rel_path = file_path.strip_prefix(&save_path).unwrap_or(file_path);
-                                    let filename = rel_path.to_string_lossy().to_string();
+                                    let filename = format!("manifests/{}", rel_path.to_string_lossy());
                                     match client.upload_cloud_file(&namespace, &token.account_id, &app_name, &filename, data) {
                                         Ok(_) => {},
                                         Err(e) => {
@@ -861,7 +901,7 @@ impl LegendaryApp {
                                     for (i, file) in files.iter().enumerate() {
                                         match client.download_cloud_file(&namespace, &token.account_id, &app_name, &file.file_name) {
                                             Ok(data) => {
-                                                let target_path = save_path.join(&file.file_name);
+                                                let target_path = save_path.join(&file.manifest_name);
                                                 if let Some(parent) = target_path.parent() {
                                                     let _ = std::fs::create_dir_all(parent);
                                                 }
@@ -1245,6 +1285,14 @@ impl LegendaryApp {
                             }
                         }
                         info.save_path = resolved_path;
+
+                        let mut backup_path = game_settings.and_then(|s| s.local_backup_path.clone());
+                        if backup_path.is_none() {
+                            if let Some(config_dir) = crate::auth::get_config_dir() {
+                                backup_path = Some(config_dir.join(&app_name));
+                            }
+                        }
+                        info.backup_path = backup_path;
 
                         // DLSS / DLSSD
                         let game_dir = std::path::Path::new(&install_path);
@@ -1798,7 +1846,7 @@ impl LegendaryApp {
                                 println!("Executable: {:?}", exe_path);
                                 let vars = ["GAMEID", "STORE", "STEAM_COMPAT_INSTALL_PATH", "LD_PRELOAD",
                                            "STEAM_COMPAT_CLIENT_INSTALL_PATH", "WINEPREFIX", "STEAM_COMPAT_DATA_PATH",
-                                           "PROTONPATH", "STEAM_COMPAT_APP_ID", "APP_NAME"];
+                                           "PROTONPATH", "STEAM_COMPAT_APP_ID", "APP_NAME", "PROTON_PREFER_SDL"];
                                 for var in vars {
                                     let val = cmd.get_envs().find(|(k, _): &(&std::ffi::OsStr, Option<&std::ffi::OsStr>)| k.to_str() == Some(var))
                                         .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
@@ -2027,12 +2075,13 @@ impl eframe::App for LegendaryApp {
                 WorkerResponse::OriginUriFetched(uri) => {
                     let _ = open::that(uri);
                 }
-                WorkerResponse::SaveSyncStatusFetched { app_name, files, local_time, remote_time, error } => {
+                WorkerResponse::SaveSyncStatusFetched { app_name, files, local_time, remote_time, backup_time, error } => {
                     self.save_sync_status = Some(SaveSyncStatus {
                         app_name,
                         files,
                         local_time,
                         remote_time,
+                        backup_time,
                         loading: false,
                         error,
                     });
@@ -2467,12 +2516,14 @@ impl LegendaryApp {
                                 if let Some(item) = self.library.iter().find(|i| i.app_name == app_name) {
                                     let save_path = self.advanced_info.as_ref().and_then(|i| i.save_path.clone())
                                         .or_else(|| self.config.games.get(&app_name).and_then(|s| s.save_path.clone()));
+                                    let backup_path = self.advanced_info.as_ref().and_then(|i| i.backup_path.clone());
 
                                     self.save_sync_status = Some(SaveSyncStatus {
                                         app_name: app_name.clone(),
                                         files: Vec::new(),
                                         local_time: None,
                                         remote_time: None,
+                                        backup_time: None,
                                         loading: true,
                                         error: None,
                                     });
@@ -2482,6 +2533,7 @@ impl LegendaryApp {
                                         app_name: app_name.clone(),
                                         namespace: item.namespace.clone(),
                                         save_path,
+                                        backup_path,
                                     });
                                 }
                             }
@@ -2660,7 +2712,7 @@ impl LegendaryApp {
                         if let Some(p) = &info.save_path {
                             ui.horizontal(|ui| {
                                 ui.label("📂");
-                                ui.label(egui::RichText::new(format!("Game Save Path: {}", p.to_string_lossy())).strong());
+                                ui.label(egui::RichText::new(format!("Local Save Path: {}", p.to_string_lossy())).strong());
                                 if ui.button("Open Folder").clicked() {
                                     let _ = open::that(p);
                                 }
@@ -2668,7 +2720,7 @@ impl LegendaryApp {
                         } else {
                             ui.horizontal(|ui| {
                                 ui.label("📂");
-                                ui.label(egui::RichText::new("Game Save Path: Not discovered").italics());
+                                ui.label(egui::RichText::new("Local Save Path: Not discovered").italics());
                             });
                         }
                         if let Some(p) = &info.dlss_path {
@@ -2697,6 +2749,63 @@ impl LegendaryApp {
                     if ui.checkbox(&mut game_settings.play_offline, "Play Offline").changed() {
                         changed = true;
                     }
+
+                    ui.add_space(5.0);
+                    ui.group(|ui| {
+                        ui.label("Save Settings:");
+                        ui.horizontal(|ui| {
+                            let mut save_str = game_settings.save_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.add(egui::TextEdit::singleline(&mut save_str).hint_text("Custom Local Save Path (optional)")).changed() {
+                                game_settings.save_path = if save_str.is_empty() { None } else { Some(std::path::PathBuf::from(save_str)) };
+                                changed = true;
+                            }
+                            if ui.button("Browse...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                    game_settings.save_path = Some(path);
+                                    changed = true;
+                                }
+                            }
+                        });
+                        ui.separator();
+                        ui.label("Local Backup Settings:");
+                        if ui.checkbox(&mut game_settings.local_backup_enabled, "Enable Local Backup").changed() {
+                            changed = true;
+                        }
+                        if let Some(info) = &self.advanced_info {
+                            if let Some(p) = &info.backup_path {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("Path: {}", p.to_string_lossy()));
+                                    if ui.button("Open").clicked() {
+                                        let _ = open::that(p);
+                                    }
+                                });
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            let mut backup_str = game_settings.local_backup_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.add(egui::TextEdit::singleline(&mut backup_str).hint_text("Custom Backup Path (optional)")).changed() {
+                                game_settings.local_backup_path = if backup_str.is_empty() { None } else { Some(std::path::PathBuf::from(backup_str)) };
+                                changed = true;
+                            }
+                            if ui.button("Browse...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                    game_settings.local_backup_path = Some(path);
+                                    changed = true;
+                                }
+                            }
+                        });
+                        if let Some(info) = &self.advanced_info {
+                            if let (Some(src), Some(dst)) = (&info.save_path, &info.backup_path) {
+                                if ui.button("Backup Now (Local -> Backup)").clicked() {
+                                    let _ = self.tx.send(WorkerMsg::CreateLocalBackup {
+                                        app_name: app_name.clone(),
+                                        source: src.clone(),
+                                        destination: dst.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    });
 
                     ui.add_space(5.0);
                     ui.label("Custom Executable Path (optional):");
@@ -3047,11 +3156,13 @@ impl LegendaryApp {
                     if ui.button("Retry").clicked() {
                         if let Some(item) = self.library.iter().find(|i| i.app_name == status.app_name) {
                             let save_path = self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone());
+                            let backup_path = self.advanced_info.as_ref().and_then(|i| i.backup_path.clone());
                             self.save_sync_status = Some(SaveSyncStatus {
                                 app_name: status.app_name.clone(),
                                 files: Vec::new(),
                                 local_time: None,
                                 remote_time: None,
+                                backup_time: None,
                                 loading: true,
                                 error: None,
                             });
@@ -3059,6 +3170,7 @@ impl LegendaryApp {
                                 app_name: status.app_name.clone(),
                                 namespace: item.namespace.clone(),
                                 save_path,
+                                backup_path,
                             });
                         }
                     }
@@ -3070,7 +3182,7 @@ impl LegendaryApp {
             let can_download = !status.files.is_empty();
 
             ui.horizontal_top(|ui| {
-                let box_width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                let box_width = (ui.available_width() - ui.spacing().item_spacing.x * 2.0) / 3.0;
                 let box_height = 250.0;
 
                 // Local Box
@@ -3096,7 +3208,7 @@ impl LegendaryApp {
                             ui.add_space(20.0);
 
                             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                                if ui.add_enabled(can_upload, egui::Button::new(egui::RichText::new("Upload").strong()).min_size(egui::vec2(box_width - 20.0, 30.0))).clicked() {
+                                if ui.add_enabled(can_upload, egui::Button::new(egui::RichText::new("Upload Local -> Cloud").strong())).clicked() {
                                     let save_path = self.advanced_info.as_ref().and_then(|i| i.save_path.clone())
                                         .or_else(|| self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone()));
 
@@ -3105,6 +3217,44 @@ impl LegendaryApp {
                                             app_name: status.app_name.clone(),
                                             namespace: item.namespace.clone(),
                                             save_path: sp,
+                                        });
+                                    }
+                                }
+                            });
+                        });
+                    });
+                });
+
+                // Local Backup Box
+                let backup_frame = egui::Frame::group(ui.style())
+                    .rounding(5.0)
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
+
+                backup_frame.show(ui, |ui| {
+                    ui.set_min_size(egui::vec2(box_width, box_height));
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::from_rgb(100, 200, 100), egui::RichText::new(" Local Backup ").strong().background_color(egui::Color32::from_rgb(40, 80, 40)));
+                        });
+                        ui.add_space(10.0);
+                        ui.vertical_centered(|ui| {
+                            if let Some(t) = status.backup_time {
+                                ui.label(t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string());
+                            } else {
+                                ui.label("No backup found");
+                            }
+                            ui.add_space(20.0);
+                            ui.label(egui::RichText::new("📦").size(80.0));
+                            ui.add_space(20.0);
+
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                                let backup_path = self.advanced_info.as_ref().and_then(|i| i.backup_path.clone());
+                                if ui.add_enabled(status.backup_time.is_some() && can_upload, egui::Button::new(egui::RichText::new("Upload Backup -> Cloud").strong())).clicked() {
+                                    if let (Some(item), Some(bp)) = (self.library.iter().find(|i| i.app_name == status.app_name), backup_path) {
+                                        let _ = self.tx.send(WorkerMsg::UploadCloudSave {
+                                            app_name: status.app_name.clone(),
+                                            namespace: item.namespace.clone(),
+                                            save_path: bp,
                                         });
                                     }
                                 }
@@ -3136,18 +3286,30 @@ impl LegendaryApp {
                             ui.add_space(20.0);
 
                             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                                if ui.add_enabled(can_download, egui::Button::new(egui::RichText::new("Download").strong()).min_size(egui::vec2(box_width - 20.0, 30.0))).clicked() {
-                                    let save_path = self.advanced_info.as_ref().and_then(|i| i.save_path.clone())
-                                        .or_else(|| self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone()));
+                                ui.vertical(|ui| {
+                                    if ui.add_enabled(can_download, egui::Button::new(egui::RichText::new("Download Cloud -> Local").strong())).clicked() {
+                                        let save_path = self.advanced_info.as_ref().and_then(|i| i.save_path.clone())
+                                            .or_else(|| self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone()));
 
-                                    if let (Some(item), Some(sp)) = (self.library.iter().find(|i| i.app_name == status.app_name), save_path) {
-                                        let _ = self.tx.send(WorkerMsg::DownloadCloudSave {
-                                            app_name: status.app_name.clone(),
-                                            namespace: item.namespace.clone(),
-                                            save_path: sp,
-                                        });
+                                        if let (Some(item), Some(sp)) = (self.library.iter().find(|i| i.app_name == status.app_name), save_path) {
+                                            let _ = self.tx.send(WorkerMsg::DownloadCloudSave {
+                                                app_name: status.app_name.clone(),
+                                                namespace: item.namespace.clone(),
+                                                save_path: sp,
+                                            });
+                                        }
                                     }
-                                }
+                                    if ui.add_enabled(can_download, egui::Button::new(egui::RichText::new("Download Cloud -> Backup").strong())).clicked() {
+                                        let backup_path = self.advanced_info.as_ref().and_then(|i| i.backup_path.clone());
+                                        if let (Some(item), Some(bp)) = (self.library.iter().find(|i| i.app_name == status.app_name), backup_path) {
+                                            let _ = self.tx.send(WorkerMsg::DownloadCloudSave {
+                                                app_name: status.app_name.clone(),
+                                                namespace: item.namespace.clone(),
+                                                save_path: bp,
+                                            });
+                                        }
+                                    }
+                                });
                             });
                         });
                     });

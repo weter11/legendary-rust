@@ -36,6 +36,10 @@ pub struct GlobalSettings {
     pub proton_prefer_sdl: bool,
     #[serde(default)]
     pub env_vars: HashMap<String, String>,
+    #[serde(default)]
+    pub local_backup_enabled: bool,
+    #[serde(default)]
+    pub local_backup_path: Option<PathBuf>,
 }
 
 fn default_store() -> String {
@@ -59,6 +63,8 @@ impl Default for GlobalSettings {
             steam_compat_app_id: None,
             proton_prefer_sdl: false,
             env_vars: HashMap::new(),
+            local_backup_enabled: false,
+            local_backup_path: None,
         }
     }
 }
@@ -99,6 +105,10 @@ pub struct GameSettings {
     pub proton_prefer_sdl: bool,
     #[serde(default)]
     pub env_vars: HashMap<String, String>,
+    #[serde(default)]
+    pub local_backup_enabled: bool,
+    #[serde(default)]
+    pub local_backup_path: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -127,6 +137,8 @@ impl Default for GameSettings {
             steam_compat_app_id: None,
             proton_prefer_sdl: false,
             env_vars: HashMap::new(),
+            local_backup_enabled: false,
+            local_backup_path: None,
         }
     }
 }
