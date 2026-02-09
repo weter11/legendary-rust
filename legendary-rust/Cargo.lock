@@ -1942,6 +1942,7 @@ dependencies = [
  "hex",
  "home",
  "image",
+ "libc",
  "log",
  "open",
  "reqwest",

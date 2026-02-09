@@ -12,6 +12,8 @@ pub struct AppConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GlobalSettings {
     pub game_paths: Vec<PathBuf>,
+    pub compatibility_tool: Option<CompatibilityTool>,
+    pub custom_compatibility_path: Option<PathBuf>,
     #[serde(default)]
     pub use_custom_pfx: bool,
     #[serde(default)]
@@ -20,8 +22,6 @@ pub struct GlobalSettings {
     pub pre_launch_command: String,
     #[serde(default)]
     pub eos_overlay_enabled: bool,
-    #[serde(default)]
-    pub use_umu: bool,
     #[serde(default = "default_store")]
     pub umu_store: String,
     #[serde(default)]
@@ -42,11 +42,12 @@ impl Default for GlobalSettings {
     fn default() -> Self {
         Self {
             game_paths: Vec::new(),
+            compatibility_tool: None,
+            custom_compatibility_path: None,
             use_custom_pfx: false,
             custom_pfx_path: None,
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
-            use_umu: false,
             umu_store: default_store(),
             steam_compat_install_path: None,
             steam_compat_client_install_path: None,
@@ -79,8 +80,6 @@ pub struct GameSettings {
     #[serde(default = "default_true")]
     pub eos_overlay_enabled: bool,
     #[serde(default)]
-    pub use_umu: bool,
-    #[serde(default)]
     pub umu_store: Option<String>,
     #[serde(default)]
     pub steam_compat_install_path: Option<PathBuf>,
@@ -111,7 +110,6 @@ impl Default for GameSettings {
             custom_pfx_path: None,
             pre_launch_command: String::new(),
             eos_overlay_enabled: true,
-            use_umu: false,
             umu_store: None,
             steam_compat_install_path: None,
             steam_compat_client_install_path: None,
@@ -126,6 +124,7 @@ pub enum CompatibilityTool {
     SteamProton,
     CustomProtonWine,
     SystemWine,
+    UmuLauncher,
 }
 
 impl AppConfig {
@@ -138,7 +137,21 @@ impl AppConfig {
                     Err(e) => log::error!("Failed to parse config.toml at {:?}: {}", p, e),
                 }
             } else {
-                log::info!("No config.toml found at {:?}, using defaults", p);
+                log::info!("No config.toml found at {:?}, creating default with examples", p);
+                let default_config = Self::default();
+                let mut content = "# Legendary Rust Configuration\n\n".to_string();
+                content.push_str("# Global Settings\n[global]\n");
+                content.push_str("game_paths = []\n");
+                content.push_str("compatibility_tool = \"SystemWine\" # Options: SteamProton, CustomProtonWine, SystemWine, UmuLauncher\n");
+                content.push_str("eos_overlay_enabled = true\n\n");
+                content.push_str("# Steam Compatibility Overrides (Examples)\n");
+                content.push_str("# steam_compat_install_path = \"/path/to/steam\"\n");
+                content.push_str("# steam_compat_client_install_path = \"/path/to/steam/client\"\n");
+                content.push_str("# steam_compat_data_path = \"/path/to/compatdata\"\n\n");
+                content.push_str("[games]\n");
+                let _ = std::fs::create_dir_all(p.parent().unwrap());
+                let _ = std::fs::write(p, content);
+                return default_config;
             }
         }
         Self::default()

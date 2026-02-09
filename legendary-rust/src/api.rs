@@ -2,6 +2,16 @@ use crate::models::*;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use anyhow::Result;
 
+const OAUTH_HOST: &str = "account-public-service-prod03.ol.epicgames.com";
+const LAUNCHER_HOST: &str = "launcher-public-service-prod06.ol.epicgames.com";
+const LAUNCHER_HOST_AK: &str = "launcher-public-service-prod.ak.epicgames.com";
+const ENTITLEMENT_HOST: &str = "entitlement-public-service-prod08.ol.epicgames.com";
+const EULATRACKING_HOST: &str = "eulatracking-public-service-prod06.ol.epicgames.com";
+const CATALOG_HOST: &str = "catalog-public-service-prod06.ol.epicgames.com";
+const ECOMMERCE_HOST: &str = "ecommerceintegration-public-service-ecomprod02.ol.epicgames.com";
+const DATASTORAGE_HOST: &str = "cloudstorage-public-service-prod06.ol.epicgames.com";
+const LIBRARY_HOST: &str = "library-service.live.use1a.on.epicgames.com";
+
 pub const UA_DEFAULT: &str = "UELauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit";
 pub const UA_EGS: &str = "EpicGamesLauncher/14.0.8-22004686+++Portal+Release-Live";
 
@@ -32,6 +42,7 @@ impl EgsClient {
 
         let client = reqwest::blocking::Client::builder()
             .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
         Ok(Self {
@@ -69,7 +80,7 @@ impl EgsClient {
     }
 
     fn do_auth(&mut self, params: &[(&str, &str)]) -> Result<OAuthToken> {
-        let url = "https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token";
+        let url = format!("https://{}/account/api/oauth/token", OAUTH_HOST);
 
         let response = self.client.post(url)
             .basic_auth(&self.user_basic, Some(&self.pw_basic))
@@ -116,7 +127,7 @@ impl EgsClient {
 
     pub fn get_game_token(&mut self) -> Result<String> {
         self.refresh_if_needed()?;
-        let url = "https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/exchange";
+        let url = format!("https://{}/account/api/oauth/exchange", OAUTH_HOST);
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
         let response = self.client.get(url)
@@ -154,7 +165,7 @@ impl EgsClient {
         let mut cursor = None;
 
         loop {
-            let mut url = "https://library-service.live.use1a.on.epicgames.com/library/api/public/items?includeMetadata=true".to_string();
+            let mut url = format!("https://{}/library/api/public/items?includeMetadata=true", LIBRARY_HOST);
             if let Some(c) = &cursor {
                 url.push_str(&format!("&cursor={}", c));
             }
@@ -183,7 +194,7 @@ impl EgsClient {
     pub fn get_game_assets(&mut self, platform: &str) -> Result<Vec<Asset>> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/{}", platform);
+        let url = format!("https://{}/launcher/api/public/assets/{}", LAUNCHER_HOST, platform);
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
@@ -207,8 +218,8 @@ impl EgsClient {
     pub fn get_asset_manifest(&mut self, platform: &str, namespace: &str, catalog_item_id: &str, app_name: &str, label_name: &str) -> Result<serde_json::Value> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/v2/platform/{}/namespace/{}/catalogItem/{}/app/{}/label/{}",
-            platform, namespace, catalog_item_id, app_name, label_name);
+        let url = format!("https://{}/launcher/api/public/assets/v2/platform/{}/namespace/{}/catalogItem/{}/app/{}/label/{}",
+            LAUNCHER_HOST, platform, namespace, catalog_item_id, app_name, label_name);
 
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
@@ -226,7 +237,7 @@ impl EgsClient {
     pub fn get_game_info(&mut self, namespace: &str, catalog_item_id: &str) -> Result<GameInfo> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://catalog-public-service-prod06.ol.epicgames.com/catalog/api/shared/namespace/{}/bulk/items", namespace);
+        let url = format!("https://{}/catalog/api/shared/namespace/{}/bulk/items", CATALOG_HOST, namespace);
         let response = self.client.get(&url)
             .query(&[("id", catalog_item_id)])
             .header(AUTHORIZATION, format!("bearer {}", token))
@@ -241,28 +252,39 @@ impl EgsClient {
     pub fn get_cloud_save_metadata(&mut self, namespace: &str, account_id: &str, app_id: &str) -> Result<Vec<CloudSaveFile>> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://cloudstorage-public-service-live.ak.epicgames.com/cloudstorage/api/storage/{}/{}/{}", namespace, account_id, app_id);
+        let url = format!("https://{}/cloudstorage/api/storage/{}/{}/{}", DATASTORAGE_HOST, namespace, account_id, app_id);
+        println!("[CloudSaves] Fetching metadata from: {}", url);
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
-        if response.status() == 404 {
+        let status = response.status();
+        println!("[CloudSaves] Metadata response status: {}", status);
+
+        if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(Vec::new());
         }
 
-        if !response.status().is_success() {
+        if !status.is_success() {
             let err_text = response.text()?;
-            return Err(anyhow::anyhow!("Failed to fetch cloud saves: {}", err_text));
+            println!("[CloudSaves] Metadata fetch failed: {}", err_text);
+            return Err(anyhow::anyhow!("Failed to fetch cloud saves: {} - {}", status, err_text));
         }
 
-        let files: Vec<CloudSaveFile> = response.json()?;
+        let body = response.text()?;
+        println!("[CloudSaves] Metadata response body length: {}", body.len());
+        if body.len() < 500 {
+            println!("[CloudSaves] Metadata response body: {}", body);
+        }
+
+        let files: Vec<CloudSaveFile> = serde_json::from_str(&body)?;
         Ok(files)
     }
 
     pub fn download_cloud_file(&mut self, namespace: &str, account_id: &str, app_id: &str, filename: &str) -> Result<Vec<u8>> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://cloudstorage-public-service-live.ak.epicgames.com/cloudstorage/api/storage/{}/{}/{}/{}", namespace, account_id, app_id, filename);
+        let url = format!("https://{}/cloudstorage/api/storage/{}/{}/{}/{}", DATASTORAGE_HOST, namespace, account_id, app_id, filename);
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
@@ -277,7 +299,7 @@ impl EgsClient {
     pub fn upload_cloud_file(&mut self, namespace: &str, account_id: &str, app_id: &str, filename: &str, data: Vec<u8>) -> Result<()> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://cloudstorage-public-service-live.ak.epicgames.com/cloudstorage/api/storage/{}/{}/{}/{}", namespace, account_id, app_id, filename);
+        let url = format!("https://{}/cloudstorage/api/storage/{}/{}/{}/{}", DATASTORAGE_HOST, namespace, account_id, app_id, filename);
         let response = self.client.put(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .body(data)
@@ -292,7 +314,7 @@ impl EgsClient {
 
     pub fn invalidate_session(&mut self) -> Result<()> {
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/sessions/kill/{}", token);
+        let url = format!("https://{}/account/api/oauth/sessions/kill/{}", OAUTH_HOST, token);
 
         let response = self.client.delete(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
@@ -317,8 +339,8 @@ impl EgsClient {
             .ok_or_else(|| anyhow::anyhow!("No account ID"))?;
 
         let url = format!(
-            "https://ecommerce-public-service-ecomprod02.ol.epicgames.com/ecommerce/api/public/platforms/EPIC/identities/{}/ownershipToken",
-            account_id
+            "https://{}/ecommerceintegration/api/public/platforms/EPIC/identities/{}/ownershipToken",
+            ECOMMERCE_HOST, account_id
         );
 
         let ns_catalog = format!("{}:{}", namespace, catalog_item_id);
@@ -342,7 +364,7 @@ impl EgsClient {
 
     pub fn get_launcher_manifests(&mut self, platform: &str) -> Result<serde_json::Value> {
         self.refresh_if_needed()?;
-        let url = format!("https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/v2/platform/{}/launcher", platform);
+        let url = format!("https://{}/launcher/api/public/assets/v2/platform/{}/launcher", LAUNCHER_HOST, platform);
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
         let response = self.client.get(url)
@@ -360,7 +382,7 @@ impl EgsClient {
     pub fn get_user_entitlements(&mut self) -> Result<Vec<Entitlement>> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = "https://entitlement-public-service-prod08.ol.epicgames.com/entitlement/api/public/entitlements";
+        let url = format!("https://{}/entitlement/api/public/entitlements", ENTITLEMENT_HOST);
 
         let response = self.client.get(url)
             .header(AUTHORIZATION, format!("bearer {}", token))
@@ -376,7 +398,7 @@ impl EgsClient {
 
     pub fn get_download_ticket(&mut self, platform: &str, namespace: &str, catalog_item_id: &str, app_name: &str) -> Result<DownloadTicket> {
         self.refresh_if_needed()?;
-        let url = format!("https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/v2/platform/{}/namespace/{}/catalogItem/{}/app/{}/downloadTicket", platform, namespace, catalog_item_id, app_name);
+        let url = format!("https://{}/launcher/api/public/assets/v2/platform/{}/namespace/{}/catalogItem/{}/app/{}/downloadTicket", LAUNCHER_HOST, platform, namespace, catalog_item_id, app_name);
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
         let response = self.client.get(&url)
@@ -403,5 +425,71 @@ impl EgsClient {
             ("token_type", "eg1"),
         ])?;
         Ok(token)
+    }
+
+    pub fn eula_get_status(&mut self, eula_id: &str) -> Result<Option<serde_json::Value>> {
+        self.refresh_if_needed()?;
+        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let account_id = self.get_account_id().unwrap_or_default();
+        let url = format!("https://{}/eulatracking/api/public/agreements/{}/account/{}", EULATRACKING_HOST, eula_id, account_id);
+
+        let response = self.client.get(&url)
+            .query(&[("includeAll", "true")])
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to fetch EULA status: {}", response.status()));
+        }
+
+        let json: serde_json::Value = response.json()?;
+        if json.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(None);
+        }
+        Ok(Some(json))
+    }
+
+    pub fn eula_accept(&mut self, eula_id: &str, version: i32, locale: Option<&str>) -> Result<()> {
+        self.refresh_if_needed()?;
+        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let account_id = self.get_account_id().unwrap_or_default();
+        let url = format!("https://{}/eulatracking/api/public/agreements/{}/version/{}/account/{}/accept", EULATRACKING_HOST, eula_id, version, account_id);
+
+        let mut req = self.client.post(&url)
+            .header(AUTHORIZATION, format!("bearer {}", token));
+
+        if let Some(l) = locale {
+            req = req.query(&[("locale", l)]);
+        }
+
+        let response = req.send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to accept EULA: {}", response.status()));
+        }
+
+        Ok(())
+    }
+
+    pub fn get_external_auths(&mut self) -> Result<serde_json::Value> {
+        self.refresh_if_needed()?;
+        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let account_id = self.get_account_id().unwrap_or_default();
+        let url = format!("https://{}/account/api/public/account/{}/externalAuths", OAUTH_HOST, account_id);
+
+        let response = self.client.get(&url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to fetch external auths: {}", response.status()));
+        }
+
+        let json: serde_json::Value = response.json()?;
+        Ok(json)
     }
 }

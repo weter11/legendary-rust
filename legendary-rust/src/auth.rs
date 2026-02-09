@@ -250,6 +250,30 @@ pub fn scan_and_import_games(library: &[crate::models::LibraryItem], search_path
     installed
 }
 
+pub fn load_library_cache() -> Vec<crate::models::LibraryItem> {
+    let mut path = if let Some(config_dir) = get_config_dir() {
+        config_dir
+    } else {
+        return Vec::new();
+    };
+    path.push("library.json");
+
+    if let Ok(content) = std::fs::read_to_string(path) {
+        if let Ok(items) = serde_json::from_str::<Vec<crate::models::LibraryItem>>(&content) {
+            return items;
+        }
+    }
+    Vec::new()
+}
+
+pub fn save_library_cache(items: &[crate::models::LibraryItem]) -> anyhow::Result<()> {
+    let config_dir = get_config_dir().ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
+    let path = config_dir.join("library.json");
+    let json = serde_json::to_string_pretty(items)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
 pub fn save_installed_games(games: &[crate::models::InstalledGame]) -> anyhow::Result<()> {
     let config_dir = get_config_dir().ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
     let path = config_dir.join("installed.json");

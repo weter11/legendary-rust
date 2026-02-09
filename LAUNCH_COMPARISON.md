@@ -1,0 +1,98 @@
+# Comparison: Legendary (Python) vs. Legendary-Rust Launch Logic
+
+This document compares the game launch implementation in the original Python version of Legendary and the new Rust-based reimplementation.
+
+## 1. Relevant Files
+
+### Python (`legendary`)
+*   `legendary/core.py`: Contains the core logic for constructing launch commands, resolving executables, and preparing the environment.
+*   `legendary/cli.py`: The entry point for the `launch` command, handling CLI arguments and user interactions.
+*   `legendary/models/game.py`: Defines the `LaunchParameters` structure used to pass data between the CLI and core logic.
+*   `legendary/api/egs.py`: Handles API requests to Epic Games Services, such as obtaining exchange codes and ownership tokens.
+*   `legendary/lfs/crossover.py`: Provides helper functions for detecting and configuring CrossOver on macOS.
+*   `legendary/utils/env.py`: Manages platform-specific environment variables and detection.
+*   `legendary/utils/egl_crypt.py`: Implements AES decryption used for importing and reading encrypted Epic Games Launcher user data/sessions.
+
+### Rust (`legendary-rust`)
+*   `legendary-rust/src/app.rs`: The central background worker that processes `LaunchGame` messages and executes the actual system process.
+*   `legendary-rust/src/api.rs`: The `EgsClient` implementation for fetching authentication tokens and ownership validation files.
+*   `legendary-rust/src/config.rs`: Handles loading and merging global and game-specific launch configurations (e.g., start parameters, compatibility tools).
+*   `legendary-rust/src/eos.rs`: Manages detection and registry integration for the EOS Overlay.
+*   `legendary-rust/src/models.rs`: Contains the data models for local metadata and installed game information used during launch.
+
+## 2. Launch Process Overview
+
+Both implementations follow a similar high-level process to launch a game:
+1.  **Resolve Executable**: Determine the path to the game binary.
+2.  **Authenticate**: Obtain a fresh exchange code (OAuth token) from Epic Games Services.
+3.  **DRM/Ownership**: Fetch an Ownership Token (.ovt) if required by the game.
+4.  **Construct Command**: Build the command line with standard Epic Games Launcher (EGL) arguments and environment variables.
+5.  **Execution**: Launch the process, optionally using compatibility tools (Wine, Proton, etc.).
+
+## 3. Key Technical Differences
+
+### Executable Detection
+*   **Python (`legendary`)**: Primarily relies on the `executable` path provided in the game metadata/manifest. Allows a manual override via the `override_exe` configuration option.
+*   **Rust (`legendary-rust`)**: Implements a more robust multi-stage search:
+    1.  Uses `custom_exe_path` if specified in settings.
+    2.  Uses the path from the manifest (`installed.executable`).
+    3.  Searches for files matching the `app_name` or `FolderName` attribute with common extensions (`.exe`, `.sh`).
+    4.  As a fallback, scans the entire installation directory for `.exe` files, excluding known non-game binaries (e.g., uninstallers, redistributables).
+
+### Compatibility & Linux Support
+*   **Python**: Flexible but manual. Users specify a `wrapper` command or `wine_executable`. It has specialized logic for CrossOver on macOS.
+*   **Rust**: Provides first-class integration for modern Linux gaming tools:
+    *   **UMU Launcher**: Native support for the Unified Mukako Universal launcher.
+    *   **Proton/Wine**: Structured selection of Steam Proton, Custom Proton/Wine, or System Wine via a dedicated `CompatibilityTool` enum.
+    *   **Steam Integration**: Automatically handles Steam Compatibility environment variables (`STEAM_COMPAT_DATA_PATH`, etc.).
+
+### EOS Overlay
+*   **Python**: Manages the EOS Overlay primarily through Windows registry entries or the `EOS_OVERLAY_KILLED` environment variable.
+*   **Rust**: Integrates EOS Overlay management directly into the background worker. It can automatically install/update the overlay and uses the `EOS_OVERLAY_KILLED` variable to enable/disable it based on user settings or presence.
+
+### Authentication & Decryption
+*   **Python**: Includes `egl_crypt.py`, which implements AES decryption to read encrypted session data from the Epic Games Launcher.
+    *   **EGL Auth Import**: This feature (triggered by `legendary auth --import`) allows users to log in without manually copying an exchange code. It works by:
+        1.  Locating the EGL `Saved/Config/Windows/GameUserSettings.ini` (or equivalent in a Wine prefix).
+        2.  Reading the encrypted `RememberMe` data.
+        3.  Decrypting the data using AES and specific hardcoded keys.
+        4.  Extracting the stored **Refresh Token** to initiate a new session.
+        *Note: This process typically invalidates the session in the official Epic Games Launcher, logging it out.*
+*   **Rust**: Currently lacks any decryption logic. Since **EGL Auth Import** is not yet implemented (see Roadmap), the Rust version does not yet require the AES decryption routines found in the Python version. If this feature is implemented in the future, a Rust equivalent of `egl_crypt.py` will be necessary to handle Epic's encrypted configuration files.
+
+### Cloud & Local Saves
+*   **Python (`legendary`)**:
+    *   **API Usage**: Uses the `datastorage-public-service` (SaveSync API), which is the same API used by the official Epic Games Launcher.
+    *   **Implementation**: Implements a sophisticated chunk-based system. Saves are split into 1MB chunks and a manifest is generated. This allows for delta-syncing (only uploading changed chunks) and perfect compatibility with EGL.
+    *   **Path Resolution**: Highly automated. It can resolve Windows/Wine environment variables like `{usersavedgames}`, `{locallow}`, and `{roaming}` on Linux and macOS by scanning the Wine registry or using internal fallbacks.
+    *   **Management**: Includes comprehensive CLI tools for syncing, listing, downloading backups, and cleaning up corrupted/incomplete cloud saves (`clean-saves`).
+*   **Rust (`legendary-rust`)**:
+    *   **API Usage**: Uses the simpler `cloudstorage-public-service` for direct file storage.
+    *   **Implementation**: Simple file-based upload/download. It manages saves by transferring whole files, which is easier to implement but less efficient for very large save files.
+    *   **Path Resolution**: Improves upon the basic metadata "hint" by specifically searching for account-specific subfolders. If an Epic Account ID is available, the "Resolve path" logic will look for directories named after the Account ID within the suspected save path (e.g., `AppData/Local/<Game>/<AccountID>`), matching the behavior of many modern titles.
+    *   **Management**: Provides a GUI for manual sync, upload, and download. It tracks local vs. remote timestamps to notify users of out-of-sync states.
+
+### Process Management & Shutdown
+*   **Python**: Relies on standard system process termination (killing the process) when requested.
+*   **Rust**: Implements a more robust graceful shutdown sequence. When the "Stop" button is clicked, the app sends a `SIGTERM` (on Unix) and waits for up to 10 seconds for the game to exit gracefully. If it fails to do so, it then sends a `SIGKILL` to ensure the process is terminated. This management is handled by individual background monitor threads for each running game to keep the UI responsive.
+
+## 4. Feature Gaps in Rust
+
+While the Rust implementation offers a modern GUI and streamlined launch flow, several features from the original Python version are still missing:
+
+| Feature | Python (`legendary`) | Rust (`legendary-rust`) |
+| :--- | :--- | :--- |
+| **EA/Origin Support** | Supported via `link2ea://` URIs | Supported (GUI Button) |
+| **Ubisoft Support** | Activation & Uplay checks | Supported (Detection) |
+| **Aliases** | Supported (`legendary alias ...`) | Missing |
+| **EGL Auth Import** | Can import session from EGL | Missing |
+| **WebView Login** | Optional integrated login | SID/Code only |
+| **CLI Interface** | Full-featured CLI | GUI-only |
+| **EULA Management**| View/Accept required EULAs | Supported (GUI) |
+| **Move Game** | `legendary move ...` | Missing |
+| **Detailed Info** | `legendary info ...` | Basic view only |
+| **Export Formats** | CSV/JSON/TSV output | Missing |
+
+## 5. Conclusion
+
+The Rust reimplementation (`legendary-rust`) provides a more "intelligent" launch experience, particularly for Linux users, through its advanced executable searching and native UMU/Proton integration. However, the original Python version remains more feature-complete regarding third-party store integrations (EA, Ubisoft) and advanced management utilities (aliases, game moving, EGL session import).
