@@ -1085,6 +1085,7 @@ impl LegendaryApp {
                         if let Some(installed) = installed {
                             println!("[2/7] Checking configuration and authentication...");
                             let local_meta = crate::auth::load_local_metadata(&app_name);
+                            let lib_item = cached_library_items.iter().find(|i| i.app_name == app_name);
                             let path = std::path::PathBuf::from(&installed.install_path);
                             let config = AppConfig::load();
                             let mut found = false;
@@ -1132,11 +1133,11 @@ impl LegendaryApp {
                             let sync_enabled = game_settings.map(|s| s.cloud_sync_enabled).unwrap_or(true);
                             if !offline && sync_enabled {
                                 println!("[3/7] Checking cloud saves...");
-                                if let (Some(token), Some(lib_item)) = (crate::auth::load_token().ok(), cached_library_items.iter().find(|i| i.app_name == app_name)) {
+                                if let (Some(auth_token), Some(item)) = (crate::auth::load_token().ok(), lib_item) {
                                     let save_path = game_settings.and_then(|s| s.save_path.clone());
                                     if let Some(sp) = save_path {
                                         let local_time = get_latest_local_save_time(&sp);
-                                        match client.get_cloud_save_metadata(&lib_item.namespace, &token.account_id, &app_name) {
+                                        match client.get_cloud_save_metadata(&item.namespace, &auth_token.account_id, &app_name) {
                                             Ok(files) => {
                                                 let mut remote_time = None;
                                                 for file in &files {
@@ -1291,7 +1292,6 @@ impl LegendaryApp {
                             println!("      Possible executables: {:?}", possible_exes);
                             log::info!("Possible executables: {:?}", possible_exes);
 
-                            let lib_item = cached_library_items.iter().find(|i| i.app_name == app_name);
                             let namespace = lib_item.map(|i| i.namespace.clone())
                                 .or_else(|| local_meta.as_ref().map(|m| m.metadata.namespace.clone()));
 
