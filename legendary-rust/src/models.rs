@@ -167,6 +167,10 @@ pub struct CloudSaveFile {
     pub length: u64,
     #[serde(rename = "lastModified")]
     pub last_modified: String,
+    #[serde(rename = "downloadUrl")]
+    pub download_url: Option<String>,
+    #[serde(rename = "uploadUrl")]
+    pub upload_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

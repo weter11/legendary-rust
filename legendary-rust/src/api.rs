@@ -249,10 +249,10 @@ impl EgsClient {
         Ok(info)
     }
 
-    pub fn get_cloud_save_metadata(&mut self, namespace: &str, account_id: &str, app_id: &str) -> Result<Vec<CloudSaveFile>> {
+    pub fn get_cloud_save_metadata(&mut self, _namespace: &str, account_id: &str, app_id: &str) -> Result<Vec<CloudSaveFile>> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://{}/cloudstorage/api/storage/{}/{}/{}", DATASTORAGE_HOST, namespace, account_id, app_id);
+        let url = format!("https://{}/api/v1/access/egstore/savesync/{}/{}/", DATASTORAGE_HOST, account_id, app_id);
         println!("[CloudSaves] Fetching metadata from: {}", url);
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
@@ -281,14 +281,29 @@ impl EgsClient {
         Ok(files)
     }
 
-    pub fn download_cloud_file(&mut self, namespace: &str, account_id: &str, app_id: &str, filename: &str) -> Result<Vec<u8>> {
+    pub fn download_cloud_file(&mut self, _namespace: &str, account_id: &str, app_id: &str, filename: &str) -> Result<Vec<u8>> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://{}/cloudstorage/api/storage/{}/{}/{}/{}", DATASTORAGE_HOST, namespace, account_id, app_id, filename);
-        let response = self.client.get(&url)
+
+        // First get the download URL
+        let url = format!("https://{}/api/v1/access/egstore/savesync/{}/{}/", DATASTORAGE_HOST, account_id, app_id);
+        let response = self.client.post(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
+            .json(&serde_json::json!({"files": [filename]}))
             .send()?;
 
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to get download URL: {}", response.status()));
+        }
+
+        let files: Vec<CloudSaveFile> = response.json()?;
+        let file = files.iter().find(|f| f.file_name == filename)
+            .ok_or_else(|| anyhow::anyhow!("File not found in metadata"))?;
+
+        let download_url = file.download_url.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No download URL provided"))?;
+
+        let response = self.client.get(download_url).send()?;
         if !response.status().is_success() {
             return Err(anyhow::anyhow!("Failed to download cloud file: {}", response.status()));
         }
@@ -296,12 +311,29 @@ impl EgsClient {
         Ok(response.bytes()?.to_vec())
     }
 
-    pub fn upload_cloud_file(&mut self, namespace: &str, account_id: &str, app_id: &str, filename: &str, data: Vec<u8>) -> Result<()> {
+    pub fn upload_cloud_file(&mut self, _namespace: &str, account_id: &str, app_id: &str, filename: &str, data: Vec<u8>) -> Result<()> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://{}/cloudstorage/api/storage/{}/{}/{}/{}", DATASTORAGE_HOST, namespace, account_id, app_id, filename);
-        let response = self.client.put(&url)
+
+        // First get the upload URL
+        let url = format!("https://{}/api/v1/access/egstore/savesync/{}/{}/", DATASTORAGE_HOST, account_id, app_id);
+        let response = self.client.post(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
+            .json(&serde_json::json!({"files": [filename]}))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to get upload URL: {}", response.status()));
+        }
+
+        let files: Vec<CloudSaveFile> = response.json()?;
+        let file = files.iter().find(|f| f.file_name == filename)
+            .ok_or_else(|| anyhow::anyhow!("File not found in metadata"))?;
+
+        let upload_url = file.upload_url.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No upload URL provided"))?;
+
+        let response = self.client.put(upload_url)
             .body(data)
             .send()?;
 

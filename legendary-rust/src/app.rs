@@ -46,6 +46,8 @@ pub struct LegendaryApp {
     eos_status: crate::eos::EosOverlayStatus,
     eos_prefix_path: Option<std::path::PathBuf>,
     advanced_info: Option<AdvancedInfo>,
+    new_env_key: String,
+    new_env_val: String,
 }
 
 #[derive(Clone, Default)]
@@ -1742,6 +1744,25 @@ impl LegendaryApp {
                                 cmd.env("EpicApp", &app_name);
                                 cmd.env("EpicEnv", "Prod");
 
+                                // Proton Prefer SDL
+                                let prefer_sdl = game_settings.map(|s| s.proton_prefer_sdl)
+                                    .unwrap_or(config.global.proton_prefer_sdl);
+                                if prefer_sdl {
+                                    cmd.env("PROTON_PREFER_SDL", "1");
+                                }
+
+                                // Global environment variables
+                                for (k, v) in &config.global.env_vars {
+                                    cmd.env(k, v);
+                                }
+
+                                // Per-game environment variables (override global)
+                                if let Some(gs) = game_settings {
+                                    for (k, v) in &gs.env_vars {
+                                        cmd.env(k, v);
+                                    }
+                                }
+
                                 // Additional environment variables and parameters...
                                 if let Some(val) = game_settings.and_then(|s| s.steam_compat_install_path.as_ref())
                                     .or_else(|| config.global.steam_compat_install_path.as_ref()) {
@@ -1933,6 +1954,8 @@ impl LegendaryApp {
             eos_status: crate::eos::EosOverlayStatus::default(),
             eos_prefix_path: None,
             advanced_info: None,
+            new_env_key: String::new(),
+            new_env_val: String::new(),
         }
     }
 }
@@ -2625,10 +2648,16 @@ impl LegendaryApp {
                         }
                         if let Some(p) = &info.save_path {
                             ui.horizontal(|ui| {
-                                ui.label(format!("Discovered save folder path: {}", p.to_string_lossy()));
+                                ui.label("📂");
+                                ui.label(egui::RichText::new(format!("Game Save Path: {}", p.to_string_lossy())).strong());
                                 if ui.button("Open Folder").clicked() {
                                     let _ = open::that(p);
                                 }
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label("📂");
+                                ui.label(egui::RichText::new("Game Save Path: Not discovered").italics());
                             });
                         }
                         if let Some(p) = &info.dlss_path {
@@ -2678,6 +2707,43 @@ impl LegendaryApp {
                     if ui.checkbox(&mut game_settings.eos_overlay_enabled, "Enable EOS Overlay").changed() {
                         changed = true;
                     }
+
+                    ui.add_space(5.0);
+                    if ui.checkbox(&mut game_settings.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
+                        changed = true;
+                    }
+
+                    ui.add_space(10.0);
+                    ui.label("Custom Environment Variables:");
+                    let mut to_remove = None;
+                    for (k, v) in &mut game_settings.env_vars {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{}: ", k));
+                            if ui.text_edit_singleline(v).changed() {
+                                changed = true;
+                            }
+                            if ui.button("🗑").on_hover_text("Remove").clicked() {
+                                to_remove = Some(k.clone());
+                            }
+                        });
+                    }
+                    if let Some(k) = to_remove {
+                        game_settings.env_vars.remove(&k);
+                        changed = true;
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.new_env_key).hint_text("Key");
+                        ui.text_edit_singleline(&mut self.new_env_val).hint_text("Value");
+                        if ui.button("Add").clicked() {
+                            if !self.new_env_key.is_empty() {
+                                game_settings.env_vars.insert(self.new_env_key.clone(), self.new_env_val.clone());
+                                self.new_env_key.clear();
+                                self.new_env_val.clear();
+                                changed = true;
+                            }
+                        }
+                    });
 
                     ui.add_space(10.0);
                     ui.collapsing("Manifest Files", |ui| {
@@ -3385,6 +3451,43 @@ impl LegendaryApp {
                         changed = true;
                     }
                 });
+            });
+
+            ui.add_space(10.0);
+            if ui.checkbox(&mut self.config.global.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
+                changed = true;
+            }
+
+            ui.add_space(10.0);
+            ui.label("Global Environment Variables:");
+            let mut to_remove = None;
+            for (k, v) in &mut self.config.global.env_vars {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}: ", k));
+                    if ui.text_edit_singleline(v).changed() {
+                        changed = true;
+                    }
+                    if ui.button("🗑").on_hover_text("Remove").clicked() {
+                        to_remove = Some(k.clone());
+                    }
+                });
+            }
+            if let Some(k) = to_remove {
+                self.config.global.env_vars.remove(&k);
+                changed = true;
+            }
+
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut self.new_env_key).hint_text("Key");
+                ui.text_edit_singleline(&mut self.new_env_val).hint_text("Value");
+                if ui.button("Add").clicked() {
+                    if !self.new_env_key.is_empty() {
+                        self.config.global.env_vars.insert(self.new_env_key.clone(), self.new_env_val.clone());
+                        self.new_env_key.clear();
+                        self.new_env_val.clear();
+                        changed = true;
+                    }
+                }
             });
 
             if changed {

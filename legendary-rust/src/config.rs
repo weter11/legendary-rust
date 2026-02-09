@@ -32,6 +32,10 @@ pub struct GlobalSettings {
     pub steam_compat_data_path: Option<PathBuf>,
     #[serde(default)]
     pub steam_compat_app_id: Option<String>,
+    #[serde(default)]
+    pub proton_prefer_sdl: bool,
+    #[serde(default)]
+    pub env_vars: HashMap<String, String>,
 }
 
 fn default_store() -> String {
@@ -53,6 +57,8 @@ impl Default for GlobalSettings {
             steam_compat_client_install_path: None,
             steam_compat_data_path: None,
             steam_compat_app_id: None,
+            proton_prefer_sdl: false,
+            env_vars: HashMap::new(),
         }
     }
 }
@@ -89,6 +95,10 @@ pub struct GameSettings {
     pub steam_compat_data_path: Option<PathBuf>,
     #[serde(default)]
     pub steam_compat_app_id: Option<String>,
+    #[serde(default)]
+    pub proton_prefer_sdl: bool,
+    #[serde(default)]
+    pub env_vars: HashMap<String, String>,
 }
 
 fn default_true() -> bool {
@@ -115,6 +125,8 @@ impl Default for GameSettings {
             steam_compat_client_install_path: None,
             steam_compat_data_path: None,
             steam_compat_app_id: None,
+            proton_prefer_sdl: false,
+            env_vars: HashMap::new(),
         }
     }
 }
