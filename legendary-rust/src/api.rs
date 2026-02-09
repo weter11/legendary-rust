@@ -252,9 +252,15 @@ impl EgsClient {
 
     pub fn get_cloud_save_metadata(&mut self, _namespace: &str, account_id: &str, app_id: &str) -> Result<Vec<CloudSaveFile>> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://{}/api/v1/access/egstore/savesync/{}/{}/", DATASTORAGE_HOST, account_id, app_id);
+        let token = self.token_info.as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+
+        let url = format!("https://{}/api/v1/access/egstore/savesync/{}/{}/",
+            DATASTORAGE_HOST, account_id, app_id);
+
         println!("[CloudSaves] Fetching metadata from: {}", url);
+
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
@@ -273,18 +279,40 @@ impl EgsClient {
         }
 
         let body = response.text()?;
-        println!("[CloudSaves] Metadata response body: {}", body);
+        println!("[CloudSaves] Metadata response body length: {}", body.len());
+
+        if body.len() < 500 {
+            println!("[CloudSaves] Response body: {}", body);
+        } else {
+            println!("[CloudSaves] Response body preview: {}", &body[..500]);
+        }
+
         let json: serde_json::Value = serde_json::from_str(&body)?;
         println!("[CloudSaves] Parsed structure: {:#?}", json);
 
-        let response: CloudSaveResponse = serde_json::from_value(json)?;
+        let save_response: CloudSaveResponse = serde_json::from_value(json)?;
+
         let mut files = Vec::new();
-        for (name, mut file) in response.files {
-            if file.file_name.is_empty() {
-                file.file_name = name;
+        for (filename, mut file_info) in save_response.files {
+            // Filter for manifest files only as requested
+            if !filename.contains(".manifest") {
+                continue;
             }
-            files.push(file);
+
+            let parts: Vec<&str> = filename.split('/').collect();
+            if parts.len() >= 5 {
+                file_info.app_name = parts[2].to_string();
+                file_info.file_name = filename.clone();
+                file_info.manifest_name = parts[4].to_string();
+                files.push(file_info);
+            } else {
+                if file_info.file_name.is_empty() {
+                    file_info.file_name = filename;
+                }
+                files.push(file_info);
+            }
         }
+
         Ok(files)
     }
 

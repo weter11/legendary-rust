@@ -161,8 +161,12 @@ pub struct ReleaseInfo {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CloudSaveFile {
+    #[serde(default)]
+    pub app_name: String,
     #[serde(rename = "fileName", default)]
     pub file_name: String,
+    #[serde(default)]
+    pub manifest_name: String,
     #[serde(default)]
     pub hash: String,
     #[serde(default)]

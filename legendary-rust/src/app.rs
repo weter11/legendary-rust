@@ -1175,40 +1175,51 @@ impl LegendaryApp {
 
                         if let Some(hint) = folder_hint {
                             if std::env::consts::OS == "linux" {
-                                if let Some(mut p) = info.prefix_path.clone() {
-                                    p.push("pfx/drive_c/users/steamuser/AppData/Local");
-                                    p.push(&hint);
+                                if let Some(mut p_users) = info.prefix_path.clone() {
+                                    p_users.push("pfx/drive_c/users");
+                                    if let Ok(entries) = std::fs::read_dir(&p_users) {
+                                        for entry in entries.flatten() {
+                                            let user_path = entry.path();
+                                            if !user_path.is_dir() { continue; }
 
-                                    if p.exists() {
-                                        if let Some(ref aid) = account_id {
-                                            let mut p_aid = p.clone();
-                                            p_aid.push(aid);
-                                            if p_aid.exists() { resolved_path = Some(p_aid); }
-                                            else {
-                                                let mut p_saved = p.clone();
-                                                p_saved.push("Saved/SaveGames");
-                                                p_saved.push(aid);
-                                                if p_saved.exists() { resolved_path = Some(p_saved); }
-                                                else { resolved_path = Some(p); }
-                                            }
-                                        } else { resolved_path = Some(p); }
-                                    } else {
-                                        p.pop();
-                                        let hint_no_space = hint.replace(" ", "");
-                                        p.push(&hint_no_space);
-                                        if p.exists() {
-                                            if let Some(ref aid) = account_id {
-                                                let mut p_aid = p.clone();
-                                                p_aid.push(aid);
-                                                if p_aid.exists() { resolved_path = Some(p_aid); }
-                                                else {
-                                                    let mut p_saved = p.clone();
-                                                    p_saved.push("Saved/SaveGames");
-                                                    p_saved.push(aid);
-                                                    if p_saved.exists() { resolved_path = Some(p_saved); }
-                                                    else { resolved_path = Some(p); }
+                                            let base_search_paths = vec![
+                                                user_path.join("AppData/Local"),
+                                                user_path.join("Documents"),
+                                                user_path.join("Saved Games"),
+                                                user_path.join("My Documents"),
+                                            ];
+
+                                            for base_path in base_search_paths {
+                                                let possible_hints = vec![hint.clone(), hint.replace(" ", "")];
+                                                for h in possible_hints {
+                                                    let p_hint = base_path.join(&h);
+                                                    if p_hint.exists() {
+                                                        if let Some(ref aid) = account_id {
+                                                            // Check for folder with account ID
+                                                            let p_aid = p_hint.join(aid);
+                                                            if p_aid.exists() {
+                                                                resolved_path = Some(p_aid);
+                                                                break;
+                                                            }
+
+                                                            // Check for Saved/SaveGames/AccountID (UE style)
+                                                            let p_saved = p_hint.join("Saved/SaveGames").join(aid);
+                                                            if p_saved.exists() {
+                                                                resolved_path = Some(p_saved);
+                                                                break;
+                                                            }
+                                                        }
+
+                                                        // Fallback to hint folder itself if no account-specific folder found
+                                                        if resolved_path.is_none() {
+                                                            resolved_path = Some(p_hint);
+                                                        }
+                                                        break;
+                                                    }
                                                 }
-                                            } else { resolved_path = Some(p); }
+                                                if resolved_path.is_some() { break; }
+                                            }
+                                            if resolved_path.is_some() { break; }
                                         }
                                     }
                                 }
@@ -2708,44 +2719,81 @@ impl LegendaryApp {
                         changed = true;
                     }
 
-                    ui.add_space(5.0);
-                    if ui.checkbox(&mut game_settings.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
-                        changed = true;
-                    }
-
                     ui.add_space(10.0);
-                    ui.label("Custom Environment Variables:");
-                    let mut to_remove = None;
-                    for (k, v) in &mut game_settings.env_vars {
+                    ui.collapsing("Environment Variables", |ui| {
+                        if ui.checkbox(&mut game_settings.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
+                            changed = true;
+                        }
+
+                        ui.separator();
+                        ui.label("Steam Compatibility Overrides:");
                         ui.horizontal(|ui| {
-                            ui.label(format!("{}: ", k));
-                            if ui.text_edit_singleline(v).changed() {
+                            ui.label("STEAM_COMPAT_INSTALL_PATH:");
+                            let mut path_str = game_settings.steam_compat_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.text_edit_singleline(&mut path_str).changed() {
+                                game_settings.steam_compat_install_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
                                 changed = true;
-                            }
-                            if ui.button("🗑").on_hover_text("Remove").clicked() {
-                                to_remove = Some(k.clone());
                             }
                         });
-                    }
-                    if let Some(k) = to_remove {
-                        game_settings.env_vars.remove(&k);
-                        changed = true;
-                    }
-
-                    let new_key = &mut self.new_env_key;
-                    let new_val = &mut self.new_env_val;
-                    let game_env_vars = &mut game_settings.env_vars;
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(new_key).hint_text("Key"));
-                        ui.add(egui::TextEdit::singleline(new_val).hint_text("Value"));
-                        if ui.button("Add").clicked() {
-                            if !new_key.is_empty() {
-                                game_env_vars.insert(new_key.clone(), new_val.clone());
-                                new_key.clear();
-                                new_val.clear();
+                        ui.horizontal(|ui| {
+                            ui.label("STEAM_COMPAT_CLIENT_INSTALL_PATH:");
+                            let mut path_str = game_settings.steam_compat_client_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.text_edit_singleline(&mut path_str).changed() {
+                                game_settings.steam_compat_client_install_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
                                 changed = true;
                             }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("STEAM_COMPAT_DATA_PATH:");
+                            let mut path_str = game_settings.steam_compat_data_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.text_edit_singleline(&mut path_str).changed() {
+                                game_settings.steam_compat_data_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                                changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("STEAM_COMPAT_APP_ID:");
+                            let mut id_str = game_settings.steam_compat_app_id.clone().unwrap_or_default();
+                            if ui.text_edit_singleline(&mut id_str).changed() {
+                                game_settings.steam_compat_app_id = if id_str.is_empty() { None } else { Some(id_str) };
+                                changed = true;
+                            }
+                        });
+
+                        ui.separator();
+                        ui.label("Custom Environment Variables:");
+                        let mut to_remove = None;
+                        for (k, v) in &mut game_settings.env_vars {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("{}: ", k));
+                                if ui.text_edit_singleline(v).changed() {
+                                    changed = true;
+                                }
+                                if ui.button("🗑").on_hover_text("Remove").clicked() {
+                                    to_remove = Some(k.clone());
+                                }
+                            });
                         }
+                        if let Some(k) = to_remove {
+                            game_settings.env_vars.remove(&k);
+                            changed = true;
+                        }
+
+                        let new_key = &mut self.new_env_key;
+                        let new_val = &mut self.new_env_val;
+                        let game_env_vars = &mut game_settings.env_vars;
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(new_key).hint_text("Key"));
+                            ui.add(egui::TextEdit::singleline(new_val).hint_text("Value"));
+                            if ui.button("Add").clicked() {
+                                if !new_key.is_empty() {
+                                    game_env_vars.insert(new_key.clone(), new_val.clone());
+                                    new_key.clear();
+                                    new_val.clear();
+                                    changed = true;
+                                }
+                            }
+                        });
                     });
 
                     ui.add_space(10.0);
@@ -3421,7 +3469,13 @@ impl LegendaryApp {
             }
 
             ui.add_space(10.0);
-            ui.collapsing("Default Steam Compatibility Settings", |ui| {
+            ui.collapsing("Global Environment Variables", |ui| {
+                if ui.checkbox(&mut self.config.global.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
+                    changed = true;
+                }
+
+                ui.separator();
+                ui.label("Steam Compatibility Overrides:");
                 ui.horizontal(|ui| {
                     ui.label("STEAM_COMPAT_INSTALL_PATH:");
                     let mut path_str = self.config.global.steam_compat_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
@@ -3454,46 +3508,41 @@ impl LegendaryApp {
                         changed = true;
                     }
                 });
-            });
 
-            ui.add_space(10.0);
-            if ui.checkbox(&mut self.config.global.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
-                changed = true;
-            }
+                ui.separator();
+                ui.label("Other Custom Environment Variables:");
+                let mut to_remove = None;
+                for (k, v) in &mut self.config.global.env_vars {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}: ", k));
+                        if ui.text_edit_singleline(v).changed() {
+                            changed = true;
+                        }
+                        if ui.button("🗑").on_hover_text("Remove").clicked() {
+                            to_remove = Some(k.clone());
+                        }
+                    });
+                }
+                if let Some(k) = to_remove {
+                    self.config.global.env_vars.remove(&k);
+                    changed = true;
+                }
 
-            ui.add_space(10.0);
-            ui.label("Global Environment Variables:");
-            let mut to_remove = None;
-            for (k, v) in &mut self.config.global.env_vars {
+                let new_key = &mut self.new_env_key;
+                let new_val = &mut self.new_env_val;
+                let global_env_vars = &mut self.config.global.env_vars;
                 ui.horizontal(|ui| {
-                    ui.label(format!("{}: ", k));
-                    if ui.text_edit_singleline(v).changed() {
-                        changed = true;
-                    }
-                    if ui.button("🗑").on_hover_text("Remove").clicked() {
-                        to_remove = Some(k.clone());
+                    ui.add(egui::TextEdit::singleline(new_key).hint_text("Key"));
+                    ui.add(egui::TextEdit::singleline(new_val).hint_text("Value"));
+                    if ui.button("Add").clicked() {
+                        if !new_key.is_empty() {
+                            global_env_vars.insert(new_key.clone(), new_val.clone());
+                            new_key.clear();
+                            new_val.clear();
+                            changed = true;
+                        }
                     }
                 });
-            }
-            if let Some(k) = to_remove {
-                self.config.global.env_vars.remove(&k);
-                changed = true;
-            }
-
-            let new_key = &mut self.new_env_key;
-            let new_val = &mut self.new_env_val;
-            let global_env_vars = &mut self.config.global.env_vars;
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(new_key).hint_text("Key"));
-                ui.add(egui::TextEdit::singleline(new_val).hint_text("Value"));
-                if ui.button("Add").clicked() {
-                    if !new_key.is_empty() {
-                        global_env_vars.insert(new_key.clone(), new_val.clone());
-                        new_key.clear();
-                        new_val.clear();
-                        changed = true;
-                    }
-                }
             });
 
             if changed {
