@@ -35,7 +35,7 @@ pub struct LegendaryApp {
     rx: Receiver<WorkerResponse>,
     worker_cancel: Arc<AtomicBool>,
     worker_pause: Arc<AtomicBool>,
-    running_processes: HashMap<String, std::process::Child>,
+    running_apps: HashSet<String>,
     save_sync_status: Option<SaveSyncStatus>,
     unaccepted_eulas: Vec<serde_json::Value>,
     install_info: Option<crate::models::InstallInfo>,
@@ -136,6 +136,7 @@ pub(crate) enum WorkerMsg {
         app_name: String,
         offline: bool,
     },
+    StopGame(String),
     QueryEosStatus {
         prefix: Option<std::path::PathBuf>,
     },
@@ -177,10 +178,8 @@ pub(crate) enum WorkerResponse {
     InstallInfoFetched(crate::models::InstallInfo),
     GamesScanned(Vec<InstalledGame>),
     FilesListed(Vec<String>),
-    GameLaunched {
-        app_name: String,
-        child: std::process::Child,
-    },
+    GameLaunched(String),
+    GameStopped(String),
     EosStatusFetched(crate::eos::EosOverlayStatus),
 }
 
@@ -331,6 +330,7 @@ impl LegendaryApp {
             let cancel = worker_cancel_clone;
             let pause = worker_pause_clone;
             let mut cached_library_items: Vec<LibraryItem> = Vec::new();
+            let mut stop_senders: HashMap<String, Sender<()>> = HashMap::new();
 
             let check_status = || {
                 while pause.load(Ordering::SeqCst) {
@@ -382,6 +382,11 @@ impl LegendaryApp {
                     }
                     WorkerMsg::ResumeTask => {
                         continue;
+                    }
+                    WorkerMsg::StopGame(app_name) => {
+                        if let Some(stop_tx) = stop_senders.remove(&app_name) {
+                            let _ = stop_tx.send(());
+                        }
                     }
                     WorkerMsg::Login(code) => {
                         let _ = tx.send(WorkerResponse::Error("Logging in...".to_string()));
@@ -1632,12 +1637,55 @@ impl LegendaryApp {
                                 }
 
                                 match cmd.spawn() {
-                                    Ok(child) => {
+                                    Ok(mut child) => {
                                         println!("SUCCESS: Game launched successfully!");
-                                        let _ = tx.send(WorkerResponse::GameLaunched {
-                                            app_name: app_name.clone(),
-                                            child
+                                        let _ = tx.send(WorkerResponse::GameLaunched(app_name.clone()));
+
+                                        let (stop_tx, stop_rx) = channel::<()>();
+                                        stop_senders.insert(app_name.clone(), stop_tx);
+
+                                        let tx_clone = tx.clone();
+                                        let app_name_clone = app_name.clone();
+
+                                        std::thread::spawn(move || {
+                                            let mut stopped_gracefully = false;
+                                            loop {
+                                                match stop_rx.try_recv() {
+                                                    Ok(_) => {
+                                                        // Stop requested!
+                                                        #[cfg(unix)]
+                                                        {
+                                                            unsafe { libc::kill(child.id() as i32, libc::SIGTERM); }
+                                                        }
+
+                                                        // Wait up to 10 seconds
+                                                        for _ in 0..100 {
+                                                            match child.try_wait() {
+                                                                Ok(Some(_)) => {
+                                                                    stopped_gracefully = true;
+                                                                    break;
+                                                                }
+                                                                _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+                                                            }
+                                                        }
+
+                                                        if !stopped_gracefully {
+                                                            let _ = child.kill();
+                                                        }
+                                                        break;
+                                                    }
+                                                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                                                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                                        match child.try_wait() {
+                                                            Ok(Some(_)) => break,
+                                                            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            let _ = tx_clone.send(WorkerResponse::GameStopped(app_name_clone));
                                         });
+
                                         found = true;
                                         break 'search;
                                     }
@@ -1725,7 +1773,7 @@ impl LegendaryApp {
             rx,
             worker_cancel,
             worker_pause,
-            running_processes: HashMap::new(),
+            running_apps: HashSet::new(),
             save_sync_status: None,
             unaccepted_eulas: Vec::new(),
             install_info: None,
@@ -1741,15 +1789,6 @@ impl LegendaryApp {
 
 impl eframe::App for LegendaryApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Check running processes
-        self.running_processes.retain(|_, child| {
-            match child.try_wait() {
-                Ok(Some(_status)) => false, // Process finished
-                Ok(None) => true, // Still running
-                Err(_) => false, // Error, treat as finished
-            }
-        });
-
         while let Ok(res) = self.rx.try_recv() {
             match res {
                 WorkerResponse::LoggedIn(token) => {
@@ -1840,8 +1879,11 @@ impl eframe::App for LegendaryApp {
                 WorkerResponse::FilesListed(files) => {
                     self.manifest_files = files;
                 }
-                WorkerResponse::GameLaunched { app_name, child } => {
-                    self.running_processes.insert(app_name, child);
+                WorkerResponse::GameLaunched(app_name) => {
+                    self.running_apps.insert(app_name);
+                }
+                WorkerResponse::GameStopped(app_name) => {
+                    self.running_apps.remove(&app_name);
                 }
                 WorkerResponse::EosStatusFetched(status) => {
                     self.eos_status = status;
@@ -2537,16 +2579,14 @@ impl LegendaryApp {
                 }
 
                 ui.horizontal(|ui| {
-                    let is_running = self.running_processes.contains_key(&app_name);
+                    let is_running = self.running_apps.contains(&app_name);
                     let button_text = if is_running { "Stop Game" } else { "Start Game" };
 
                     ui.vertical(|ui| {
                         if ui.button(egui::RichText::new(button_text).size(24.0).strong()).clicked() {
                             if is_running {
-                                if let Some(mut child) = self.running_processes.remove(&app_name) {
-                                    let _ = child.kill();
-                                    self.status_message = format!("Stopped game: {}", app_name);
-                                }
+                                let _ = self.tx.send(WorkerMsg::StopGame(app_name.clone()));
+                                self.status_message = format!("Stopping game: {}...", app_name);
                             } else {
                                 let offline = self.config.games.get(&app_name).map(|s| s.play_offline).unwrap_or(false);
                                 if offline {
@@ -2881,25 +2921,86 @@ impl LegendaryApp {
                             folder_hint = Some(status.app_name.clone());
                         }
 
+                        let account_id = self.token.as_ref().map(|t| t.account_id.clone());
+
                         if let Some(hint) = folder_hint {
                             if std::env::consts::OS == "linux" {
                                 if let Some(mut p) = get_default_compat_data_path() {
                                     p.push("pfx/drive_c/users/steamuser/AppData/Local");
                                     p.push(&hint);
+
+                                    // Try hint directly, or with account ID subfolder
                                     if p.exists() {
-                                        resolved_path = Some(p);
+                                        if let Some(ref aid) = account_id {
+                                            let mut p_aid = p.clone();
+                                            p_aid.push(aid);
+                                            if p_aid.exists() {
+                                                resolved_path = Some(p_aid);
+                                            } else {
+                                                // Try Saved/SaveGames/AccountID (common for many games)
+                                                let mut p_saved = p.clone();
+                                                p_saved.push("Saved/SaveGames");
+                                                p_saved.push(aid);
+                                                if p_saved.exists() {
+                                                    resolved_path = Some(p_saved);
+                                                } else {
+                                                    resolved_path = Some(p);
+                                                }
+                                            }
+                                        } else {
+                                            resolved_path = Some(p);
+                                        }
                                     } else {
                                         // Try common variants
                                         p.pop();
-                                        p.push(&hint.replace(" ", ""));
-                                        if p.exists() { resolved_path = Some(p); }
+                                        let hint_no_space = hint.replace(" ", "");
+                                        p.push(&hint_no_space);
+                                        if p.exists() {
+                                            if let Some(ref aid) = account_id {
+                                                let mut p_aid = p.clone();
+                                                p_aid.push(aid);
+                                                if p_aid.exists() {
+                                                    resolved_path = Some(p_aid);
+                                                } else {
+                                                    let mut p_saved = p.clone();
+                                                    p_saved.push("Saved/SaveGames");
+                                                    p_saved.push(aid);
+                                                    if p_saved.exists() {
+                                                        resolved_path = Some(p_saved);
+                                                    } else {
+                                                        resolved_path = Some(p);
+                                                    }
+                                                }
+                                            } else {
+                                                resolved_path = Some(p);
+                                            }
+                                        }
                                     }
                                 }
                             } else if std::env::consts::OS == "windows" {
                                 if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
                                     let mut p = std::path::PathBuf::from(local_app_data);
                                     p.push(&hint);
-                                    if p.exists() { resolved_path = Some(p); }
+                                    if p.exists() {
+                                        if let Some(ref aid) = account_id {
+                                            let mut p_aid = p.clone();
+                                            p_aid.push(aid);
+                                            if p_aid.exists() {
+                                                resolved_path = Some(p_aid);
+                                            } else {
+                                                let mut p_saved = p.clone();
+                                                p_saved.push("Saved/SaveGames");
+                                                p_saved.push(aid);
+                                                if p_saved.exists() {
+                                                    resolved_path = Some(p_saved);
+                                                } else {
+                                                    resolved_path = Some(p);
+                                                }
+                                            }
+                                        } else {
+                                            resolved_path = Some(p);
+                                        }
+                                    }
                                 }
                             }
                         }

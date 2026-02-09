@@ -69,8 +69,12 @@ Both implementations follow a similar high-level process to launch a game:
 *   **Rust (`legendary-rust`)**:
     *   **API Usage**: Uses the simpler `cloudstorage-public-service` for direct file storage.
     *   **Implementation**: Simple file-based upload/download. It manages saves by transferring whole files, which is easier to implement but less efficient for very large save files.
-    *   **Path Resolution**: Primarily manual. Users are expected to set the save path in the GUI. It provides a "hint" based on the `CloudSaveFolder` metadata attribute but does not perform the same advanced variable expansion as the Python version.
+    *   **Path Resolution**: Improves upon the basic metadata "hint" by specifically searching for account-specific subfolders. If an Epic Account ID is available, the "Resolve path" logic will look for directories named after the Account ID within the suspected save path (e.g., `AppData/Local/<Game>/<AccountID>`), matching the behavior of many modern titles.
     *   **Management**: Provides a GUI for manual sync, upload, and download. It tracks local vs. remote timestamps to notify users of out-of-sync states.
+
+### Process Management & Shutdown
+*   **Python**: Relies on standard system process termination (killing the process) when requested.
+*   **Rust**: Implements a more robust graceful shutdown sequence. When the "Stop" button is clicked, the app sends a `SIGTERM` (on Unix) and waits for up to 10 seconds for the game to exit gracefully. If it fails to do so, it then sends a `SIGKILL` to ensure the process is terminated. This management is handled by individual background monitor threads for each running game to keep the UI responsive.
 
 ## 4. Feature Gaps in Rust
 
