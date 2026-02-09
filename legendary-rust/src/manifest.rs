@@ -285,3 +285,52 @@ fn read_fstring<R: Read>(mut reader: R) -> anyhow::Result<String> {
         Ok(s)
     }
 }
+
+pub fn parse_chunk(data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut cursor = Cursor::new(data);
+
+    let magic = cursor.read_u32::<LittleEndian>()?;
+    if magic != 0xB1FE3AA2 {
+        return Err(anyhow::anyhow!("Invalid chunk magic: {:08X}", magic));
+    }
+
+    let header_version = cursor.read_u32::<LittleEndian>()?;
+    let header_size = cursor.read_u32::<LittleEndian>()?;
+    let compressed_size = cursor.read_u32::<LittleEndian>()?;
+    let mut _guid = [0u32; 4];
+    for i in 0..4 {
+        _guid[i] = cursor.read_u32::<LittleEndian>()?;
+    }
+    let _hash = cursor.read_u64::<LittleEndian>()?;
+    let stored_as = cursor.read_u8()?;
+
+    if header_version >= 2 {
+        let mut _sha_hash = [0u8; 20];
+        cursor.read_exact(&mut _sha_hash)?;
+        let _hash_type = cursor.read_u8()?;
+    }
+
+    let uncompressed_size = if header_version >= 3 {
+        cursor.read_u32::<LittleEndian>()?
+    } else {
+        1024 * 1024
+    };
+
+    cursor.seek(SeekFrom::Start(header_size as u64))?;
+
+    let chunk_data = if stored_as & 1 != 0 {
+        let mut decoder = ZlibDecoder::new(&data[cursor.position() as usize..]);
+        let mut decoded = Vec::with_capacity(uncompressed_size as usize);
+        decoder.read_to_end(&mut decoded)?;
+        decoded
+    } else {
+        data[cursor.position() as usize..].to_vec()
+    };
+
+    if chunk_data.len() > uncompressed_size as usize {
+        // Legendary pads chunks to 1MiB with zeros, but we might only want the actual data if uncompressed_size is set correctly
+        Ok(chunk_data[..uncompressed_size as usize].to_vec())
+    } else {
+        Ok(chunk_data)
+    }
+}

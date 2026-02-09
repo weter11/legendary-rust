@@ -52,6 +52,7 @@ pub struct LegendaryApp {
 
 #[derive(Clone, Default)]
 pub struct AdvancedInfo {
+    pub app_name: String,
     pub save_path: Option<std::path::PathBuf>,
     pub backup_path: Option<std::path::PathBuf>,
     pub prefix_path: Option<std::path::PathBuf>,
@@ -895,32 +896,124 @@ impl LegendaryApp {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Downloading saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                         if let Ok(token) = crate::auth::load_token() {
                             match client.get_cloud_save_metadata(&namespace, &token.account_id, &app_name) {
-                                Ok(files) => {
-                                    let total = files.len();
+                                Ok(mut manifest_files) => {
+                                    manifest_files.sort_by(|a, b| a.file_name.cmp(&b.file_name));
                                     let mut success = true;
-                                    for (i, file) in files.iter().enumerate() {
-                                        match client.download_cloud_file(&namespace, &token.account_id, &app_name, &file.file_name) {
-                                            Ok(data) => {
-                                                let target_path = save_path.join(&file.manifest_name);
-                                                if let Some(parent) = target_path.parent() {
-                                                    let _ = std::fs::create_dir_all(parent);
+                                    let mut manifests_downloaded = 0;
+                                    for file in manifest_files {
+                                        let manifest_data = match client.download_cloud_file(&namespace, &token.account_id, &app_name, &file.file_name) {
+                                            Ok(d) => d,
+                                            Err(e) => {
+                                                let _ = tx.send(WorkerResponse::Error(format!("Failed to download manifest {}: {}", file.file_name, e)));
+                                                success = false;
+                                                break;
+                                            }
+                                        };
+
+                                        let manifest = match crate::manifest::parse_manifest(&manifest_data) {
+                                            Ok(m) => m,
+                                            Err(e) => {
+                                                let _ = tx.send(WorkerResponse::Error(format!("Failed to parse manifest {}: {}", file.file_name, e)));
+                                                success = false;
+                                                break;
+                                            }
+                                        };
+
+                                        let chunk_paths: Vec<String> = manifest.chunks.values().map(|c| c.path(manifest.manifest_version)).collect();
+                                        let chunk_links = match client.get_cloud_save_links(&token.account_id, &app_name, &chunk_paths) {
+                                            Ok(links) => links,
+                                            Err(e) => {
+                                                let _ = tx.send(WorkerResponse::Error(format!("Failed to get chunk links: {}", e)));
+                                                success = false;
+                                                break;
+                                            }
+                                        };
+
+                                        let mut downloaded_chunks = std::collections::HashMap::new();
+                                        let total_chunks = manifest.chunks.len();
+                                        for (i, (guid, chunk_info)) in manifest.chunks.iter().enumerate() {
+                                            let path = chunk_info.path(manifest.manifest_version);
+                                            let link_info = match chunk_links.get(&path) {
+                                                Some(l) => l,
+                                                None => {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("Chunk {} not found in cloud", path)));
+                                                    success = false;
+                                                    break;
                                                 }
-                                                if let Err(e) = std::fs::write(&target_path, data) {
-                                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to write {}: {}", file.file_name, e)));
+                                            };
+                                            let read_link = match &link_info.read_link {
+                                                Some(rl) => rl,
+                                                None => {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("No read link for chunk {}", path)));
+                                                    success = false;
+                                                    break;
+                                                }
+                                            };
+
+                                            let chunk_data = match client.download_manifest(read_link, None) {
+                                                Ok(d) => d,
+                                                Err(e) => {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to download chunk {}: {}", path, e)));
+                                                    success = false;
+                                                    break;
+                                                }
+                                            };
+
+                                            let raw_data = match crate::manifest::parse_chunk(&chunk_data) {
+                                                Ok(d) => d,
+                                                Err(e) => {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to parse chunk {}: {}", path, e)));
+                                                    success = false;
+                                                    break;
+                                                }
+                                            };
+                                            downloaded_chunks.insert(*guid, raw_data);
+                                            let _ = tx.send(WorkerResponse::TaskProgress {
+                                                task_name: format!("Downloading chunks for {}", app_name),
+                                                progress: (i + 1) as f32 / total_chunks as f32,
+                                                is_paused: false, speed: None, eta: None
+                                            });
+                                        }
+
+                                        if !success { break; }
+
+                                        for (_, file_manifest) in manifest.files {
+                                            let target_file_path = save_path.join(&file_manifest.filename);
+                                            if let Some(parent) = target_file_path.parent() {
+                                                let _ = std::fs::create_dir_all(parent);
+                                            }
+
+                                            let mut file_data = Vec::with_capacity(file_manifest.file_size as usize);
+                                            for part in file_manifest.chunk_parts {
+                                                if let Some(chunk_raw) = downloaded_chunks.get(&part.guid) {
+                                                    let start = part.offset as usize;
+                                                    let end = start + part.size as usize;
+                                                    if end <= chunk_raw.len() {
+                                                        file_data.extend_from_slice(&chunk_raw[start..end]);
+                                                    } else {
+                                                        let _ = tx.send(WorkerResponse::Error(format!("Chunk part out of bounds for file {}", file_manifest.filename)));
+                                                        success = false;
+                                                        break;
+                                                    }
+                                                } else {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("Missing chunk for file {}", file_manifest.filename)));
                                                     success = false;
                                                     break;
                                                 }
                                             }
-                                            Err(e) => {
-                                                let _ = tx.send(WorkerResponse::Error(format!("Failed to download {}: {}", file.file_name, e)));
+                                            if !success { break; }
+
+                                            if let Err(e) = std::fs::write(&target_file_path, file_data) {
+                                                let _ = tx.send(WorkerResponse::Error(format!("Failed to write file {}: {}", file_manifest.filename, e)));
                                                 success = false;
                                                 break;
                                             }
                                         }
-                                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Downloading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false, speed: None, eta: None });
+                                        if !success { break; }
+                                        manifests_downloaded += 1;
                                     }
                                     if success {
-                                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Download for {} complete. {} files downloaded.", app_name, total)));
+                                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Cloud save download for {} complete. {} manifests processed.", app_name, manifests_downloaded)));
                                     }
                                 }
                                 Err(e) => {
@@ -1179,7 +1272,10 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::FetchAdvancedInfo { app_name, install_path } => {
-                        let mut info = AdvancedInfo::default();
+                        let mut info = AdvancedInfo {
+                            app_name: app_name.clone(),
+                            ..Default::default()
+                        };
                         let config = AppConfig::load();
                         let game_settings = config.games.get(&app_name);
 
