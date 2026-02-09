@@ -2736,8 +2736,8 @@ impl LegendaryApp {
                     let new_val = &mut self.new_env_val;
                     let game_env_vars = &mut game_settings.env_vars;
                     ui.horizontal(|ui| {
-                        ui.text_edit_singleline(new_key).hint_text("Key");
-                        ui.text_edit_singleline(new_val).hint_text("Value");
+                        ui.add(egui::TextEdit::singleline(new_key).hint_text("Key"));
+                        ui.add(egui::TextEdit::singleline(new_val).hint_text("Value"));
                         if ui.button("Add").clicked() {
                             if !new_key.is_empty() {
                                 game_env_vars.insert(new_key.clone(), new_val.clone());
@@ -3484,8 +3484,8 @@ impl LegendaryApp {
             let new_val = &mut self.new_env_val;
             let global_env_vars = &mut self.config.global.env_vars;
             ui.horizontal(|ui| {
-                ui.text_edit_singleline(new_key).hint_text("Key");
-                ui.text_edit_singleline(new_val).hint_text("Value");
+                ui.add(egui::TextEdit::singleline(new_key).hint_text("Key"));
+                ui.add(egui::TextEdit::singleline(new_val).hint_text("Value"));
                 if ui.button("Add").clicked() {
                     if !new_key.is_empty() {
                         global_env_vars.insert(new_key.clone(), new_val.clone());
