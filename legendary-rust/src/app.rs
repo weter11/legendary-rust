@@ -2696,7 +2696,7 @@ impl LegendaryApp {
                 }
 
                 ui.add_space(10.0);
-                ui.collapsing("Advanced", |ui| {
+                ui.collapsing("Advanced Options", |ui| {
                     let mut changed = false;
                     let game_settings = self.config.games.entry(app_name.clone()).or_default();
 
@@ -2752,10 +2752,10 @@ impl LegendaryApp {
 
                     ui.add_space(5.0);
                     ui.group(|ui| {
-                        ui.label("Save Settings:");
+                        ui.label("Advanced path to save file:");
                         ui.horizontal(|ui| {
                             let mut save_str = game_settings.save_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                            if ui.add(egui::TextEdit::singleline(&mut save_str).hint_text("Custom Local Save Path (optional)")).changed() {
+                            if ui.add(egui::TextEdit::singleline(&mut save_str).hint_text("Advanced path to save file (optional)")).changed() {
                                 game_settings.save_path = if save_str.is_empty() { None } else { Some(std::path::PathBuf::from(save_str)) };
                                 changed = true;
                             }
@@ -3178,7 +3178,8 @@ impl LegendaryApp {
                 return;
             }
 
-            let can_upload = self.config.games.get(&status.app_name).and_then(|s| s.save_path.as_ref()).is_some();
+            let can_upload = self.config.games.get(&status.app_name).and_then(|s| s.save_path.as_ref()).is_some()
+                || (self.advanced_info.as_ref().map(|i| i.app_name == status.app_name && i.save_path.is_some()).unwrap_or(false));
             let can_download = !status.files.is_empty();
 
             ui.horizontal_top(|ui| {
@@ -3203,9 +3204,49 @@ impl LegendaryApp {
                             } else {
                                 ui.label("No local save found");
                             }
-                            ui.add_space(20.0);
+
+                            let current_save_path = self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone());
+                            if let Some(p) = current_save_path {
+                                ui.label(egui::RichText::new(format!("Path: {}", p.to_string_lossy())).small());
+                            } else if let Some(info) = &self.advanced_info {
+                                if info.app_name == status.app_name {
+                                    if let Some(p) = &info.save_path {
+                                        ui.label(egui::RichText::new(format!("Discovered: {}", p.to_string_lossy())).small().italics());
+                                    }
+                                }
+                            }
+
+                            if ui.button("Change Path...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                    let game_settings = self.config.games.entry(status.app_name.clone()).or_default();
+                                    game_settings.save_path = Some(path.clone());
+                                    let _ = self.config.save();
+
+                                    // Refresh status
+                                    if let Some(item) = self.library.iter().find(|i| i.app_name == status.app_name) {
+                                        let backup_path = self.advanced_info.as_ref().and_then(|i| i.backup_path.clone());
+                                        self.save_sync_status = Some(SaveSyncStatus {
+                                            app_name: status.app_name.clone(),
+                                            files: Vec::new(),
+                                            local_time: None,
+                                            remote_time: None,
+                                            backup_time: None,
+                                            loading: true,
+                                            error: None,
+                                        });
+                                        let _ = self.tx.send(WorkerMsg::SyncCloudSaves {
+                                            app_name: status.app_name.clone(),
+                                            namespace: item.namespace.clone(),
+                                            save_path: Some(path),
+                                            backup_path,
+                                        });
+                                    }
+                                }
+                            }
+
+                            ui.add_space(10.0);
                             ui.label(egui::RichText::new("🖴").size(80.0));
-                            ui.add_space(20.0);
+                            ui.add_space(10.0);
 
                             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                                 if ui.add_enabled(can_upload, egui::Button::new(egui::RichText::new("Upload Local -> Cloud").strong())).clicked() {
@@ -3631,7 +3672,7 @@ impl LegendaryApp {
             }
 
             ui.add_space(10.0);
-            ui.collapsing("Global Environment Variables", |ui| {
+                ui.collapsing("Advanced Options", |ui| {
                 if ui.checkbox(&mut self.config.global.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
                     changed = true;
                 }
