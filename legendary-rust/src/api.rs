@@ -273,12 +273,18 @@ impl EgsClient {
         }
 
         let body = response.text()?;
-        println!("[CloudSaves] Metadata response body length: {}", body.len());
-        if body.len() < 500 {
-            println!("[CloudSaves] Metadata response body: {}", body);
-        }
+        println!("[CloudSaves] Metadata response body: {}", body);
+        let json: serde_json::Value = serde_json::from_str(&body)?;
+        println!("[CloudSaves] Parsed structure: {:#?}", json);
 
-        let files: Vec<CloudSaveFile> = serde_json::from_str(&body)?;
+        let response: CloudSaveResponse = serde_json::from_value(json)?;
+        let mut files = Vec::new();
+        for (name, mut file) in response.files {
+            if file.file_name.is_empty() {
+                file.file_name = name;
+            }
+            files.push(file);
+        }
         Ok(files)
     }
 
@@ -297,12 +303,15 @@ impl EgsClient {
             return Err(anyhow::anyhow!("Failed to get download URL: {}", response.status()));
         }
 
-        let files: Vec<CloudSaveFile> = response.json()?;
-        let file = files.iter().find(|f| f.file_name == filename)
-            .ok_or_else(|| anyhow::anyhow!("File not found in metadata"))?;
+        let body = response.text()?;
+        let json: serde_json::Value = serde_json::from_str(&body)?;
+        let response: CloudSaveResponse = serde_json::from_value(json)?;
 
-        let download_url = file.download_url.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No download URL provided"))?;
+        let file = response.files.get(filename)
+            .ok_or_else(|| anyhow::anyhow!("File {} not found in metadata", filename))?;
+
+        let download_url = file.read_link.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No readLink provided for {}", filename))?;
 
         let response = self.client.get(download_url).send()?;
         if !response.status().is_success() {
@@ -327,12 +336,15 @@ impl EgsClient {
             return Err(anyhow::anyhow!("Failed to get upload URL: {}", response.status()));
         }
 
-        let files: Vec<CloudSaveFile> = response.json()?;
-        let file = files.iter().find(|f| f.file_name == filename)
-            .ok_or_else(|| anyhow::anyhow!("File not found in metadata"))?;
+        let body = response.text()?;
+        let json: serde_json::Value = serde_json::from_str(&body)?;
+        let response: CloudSaveResponse = serde_json::from_value(json)?;
 
-        let upload_url = file.upload_url.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No upload URL provided"))?;
+        let file = response.files.get(filename)
+            .ok_or_else(|| anyhow::anyhow!("File {} not found in metadata", filename))?;
+
+        let upload_url = file.write_link.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No writeLink provided for {}", filename))?;
 
         let response = self.client.put(upload_url)
             .body(data)
