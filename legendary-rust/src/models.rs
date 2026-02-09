@@ -68,6 +68,10 @@ pub struct GameInfo {
     pub namespace: String,
     #[serde(rename = "customAttributes")]
     pub custom_attributes: Option<std::collections::HashMap<String, CustomAttribute>>,
+    #[serde(rename = "partnerLinkType")]
+    pub partner_link_type: Option<String>,
+    #[serde(rename = "eulaIds")]
+    pub eula_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

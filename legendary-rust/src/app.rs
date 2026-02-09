@@ -37,6 +37,7 @@ pub struct LegendaryApp {
     worker_pause: Arc<AtomicBool>,
     running_processes: HashMap<String, std::process::Child>,
     save_sync_status: Option<SaveSyncStatus>,
+    unaccepted_eulas: Vec<serde_json::Value>,
     install_info: Option<crate::models::InstallInfo>,
     selected_tags: HashSet<String>,
     current_task: Option<TaskStatus>,
@@ -94,6 +95,12 @@ pub(crate) enum WorkerMsg {
         namespace: String,
         save_path: Option<std::path::PathBuf>,
     },
+    CheckEula(Vec<String>),
+    AcceptEula {
+        eula_id: String,
+        version: i32,
+    },
+    LaunchOrigin(String),
     UploadCloudSave {
         app_name: String,
         namespace: String,
@@ -164,6 +171,8 @@ pub(crate) enum WorkerResponse {
         remote_time: Option<DateTime<Utc>>,
         error: Option<String>,
     },
+    EulaStatusFetched(Vec<serde_json::Value>),
+    OriginUriFetched(String),
     InstallInfoFetched(crate::models::InstallInfo),
     GamesScanned(Vec<InstalledGame>),
     FilesListed(Vec<String>),
@@ -664,6 +673,56 @@ impl LegendaryApp {
                         }
                         let _ = tx.send(WorkerResponse::TaskFinished(format!("Task '{}' complete", task_name)));
                         ctx_clone.request_repaint();
+                    }
+                    WorkerMsg::CheckEula(eula_ids) => {
+                        let mut unaccepted = Vec::new();
+                        for id in eula_ids {
+                            match client.eula_get_status(&id) {
+                                Ok(Some(eula)) => unaccepted.push(eula),
+                                Ok(None) => {},
+                                Err(e) => log::warn!("Failed to check EULA status for {}: {}", id, e),
+                            }
+                        }
+                        let _ = tx.send(WorkerResponse::EulaStatusFetched(unaccepted));
+                        ctx_clone.request_repaint();
+                    }
+                    WorkerMsg::AcceptEula { eula_id, version } => {
+                        match client.eula_accept(&eula_id, version, None) {
+                            Ok(_) => {
+                                // Re-check if other EULAs exist
+                                // Simplified: assume it was the only one or user will refresh
+                            }
+                            Err(e) => {
+                                let _ = tx.send(WorkerResponse::Error(format!("Failed to accept EULA: {}", e)));
+                            }
+                        }
+                    }
+                    WorkerMsg::LaunchOrigin(app_name) => {
+                        match client.get_game_token() {
+                            Ok(token) => {
+                                let user_name = client.get_display_name().unwrap_or_default();
+                                let account_id = client.get_account_id().unwrap_or_default();
+                                let mut url = format!("link2ea://launchgame/{}?AUTH_PASSWORD={}&AUTH_TYPE=exchangecode&epicusername={}&epicuserid={}&epiclocale=en",
+                                    app_name, token, urlencoding::encode(&user_name), account_id);
+
+                                // Find metadata for extra args if any
+                                if let Some(item) = cached_library_items.iter().find(|i| i.app_name == app_name) {
+                                    if let Some(meta) = &item.metadata {
+                                        if let Some(extra) = meta["customAttributes"]["AdditionalCommandline"]["value"].as_str() {
+                                            for part in extra.split('&') {
+                                                url.push('&');
+                                                url.push_str(part);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let _ = tx.send(WorkerResponse::OriginUriFetched(url));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(WorkerResponse::Error(format!("Failed to get game token for Origin: {}", e)));
+                            }
+                        }
                     }
                     WorkerMsg::SyncCloudSaves { app_name, namespace, save_path } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Checking cloud saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
@@ -1700,6 +1759,11 @@ impl eframe::App for LegendaryApp {
                     self.library = items;
                 }
                 WorkerResponse::GameInfoFetched(info) => {
+                    if let Some(ref eulas) = info.eula_ids {
+                        if !eulas.is_empty() {
+                            let _ = self.tx.send(WorkerMsg::CheckEula(eulas.clone()));
+                        }
+                    }
                     self.selected_game = Some(info);
                     self.current_view = View::GameDetail;
                 }
@@ -1731,6 +1795,12 @@ impl eframe::App for LegendaryApp {
                 WorkerResponse::TaskFinished(msg) => {
                     self.status_message = msg;
                     self.current_task = None;
+                }
+                WorkerResponse::EulaStatusFetched(eulas) => {
+                    self.unaccepted_eulas = eulas;
+                }
+                WorkerResponse::OriginUriFetched(uri) => {
+                    let _ = open::that(uri);
                 }
                 WorkerResponse::SaveSyncStatusFetched { app_name, files, local_time, remote_time, error } => {
                     self.save_sync_status = Some(SaveSyncStatus {
@@ -2030,6 +2100,7 @@ impl LegendaryApp {
                                     }
                                     if ui.button(egui::RichText::new(title).strong().size(18.0)).clicked() {
                                         self.selected_app_name = Some(item.app_name.clone());
+                                        self.unaccepted_eulas.clear();
                                         let _ = self.tx.send(WorkerMsg::FetchAssets);
                                         let _ = self.tx.send(WorkerMsg::FetchGameInfo {
                                             app_name: item.app_name.clone(),
@@ -2126,6 +2197,34 @@ impl LegendaryApp {
                                 let platforms: Vec<_> = release_info.iter().flat_map(|r| &r.platform).collect();
                                 ui.label(format!("Platform: {:?}", platforms));
                             }
+                        }
+
+                        // Ubisoft Support
+                        if let Some(partner) = &game.partner_link_type {
+                            if partner.to_lowercase() == "ubisoft" {
+                                ui.group(|ui| {
+                                    ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ Ubisoft title detected");
+                                    ui.label("This game requires activation on Ubisoft Connect.");
+                                    if ui.button("Open Ubisoft Activation Guide").clicked() {
+                                        let _ = open::that("https://github.com/derrod/legendary/wiki/Ubisoft-Activation");
+                                    }
+                                });
+                            }
+                        }
+
+                        // EA/Origin Support
+                        let is_ea = local_meta.as_ref().and_then(|m| m.metadata.custom_attributes.as_ref())
+                            .and_then(|attrs| attrs.get("ThirdPartyManagedApp"))
+                            .map(|a| a.value.to_lowercase().contains("origin") || a.value.to_lowercase().contains("ea app"))
+                            .unwrap_or(false);
+
+                        if is_ea {
+                            ui.group(|ui| {
+                                ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ EA/Origin title detected");
+                                if ui.button(egui::RichText::new("🚀 Launch via Origin/EA App").strong()).clicked() {
+                                    let _ = self.tx.send(WorkerMsg::LaunchOrigin(app_name.clone()));
+                                }
+                            });
                         }
 
                         if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == app_name) {
@@ -2284,6 +2383,31 @@ impl LegendaryApp {
                             });
                         }
                     }
+                }
+
+                ui.separator();
+                if !self.unaccepted_eulas.is_empty() {
+                    ui.add_space(10.0);
+                    ui.group(|ui| {
+                        ui.colored_label(egui::Color32::YELLOW, egui::RichText::new("⚠ Unaccepted EULAs").strong());
+                        for eula in self.unaccepted_eulas.clone() {
+                            ui.horizontal(|ui| {
+                                ui.label(eula["title"].as_str().unwrap_or("Unknown EULA"));
+                                if ui.button("View").clicked() {
+                                    if let Some(url) = eula["url"].as_str() {
+                                        let _ = open::that(url);
+                                    }
+                                }
+                                if ui.button("Accept").clicked() {
+                                    let id = eula["key"].as_str().unwrap_or_default().to_string();
+                                    let version = eula["version"].as_i64().unwrap_or(1) as i32;
+                                    let _ = self.tx.send(WorkerMsg::AcceptEula { eula_id: id, version });
+                                    // Remove from list
+                                    self.unaccepted_eulas.retain(|e| e["key"] != eula["key"]);
+                                }
+                            });
+                        }
+                    });
                 }
 
                 ui.separator();

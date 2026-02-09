@@ -78,13 +78,13 @@ While the Rust implementation offers a modern GUI and streamlined launch flow, s
 
 | Feature | Python (`legendary`) | Rust (`legendary-rust`) |
 | :--- | :--- | :--- |
-| **EA/Origin Support** | Supported via `link2ea://` URIs | Missing |
-| **Ubisoft Support** | Activation & Uplay requirement checks | Missing |
+| **EA/Origin Support** | Supported via `link2ea://` URIs | Supported (GUI Button) |
+| **Ubisoft Support** | Activation & Uplay checks | Supported (Detection) |
 | **Aliases** | Supported (`legendary alias ...`) | Missing |
 | **EGL Auth Import** | Can import session from EGL | Missing |
 | **WebView Login** | Optional integrated login | SID/Code only |
 | **CLI Interface** | Full-featured CLI | GUI-only |
-| **EULA Management**| View/Accept required EULAs | Missing |
+| **EULA Management**| View/Accept required EULAs | Supported (GUI) |
 | **Move Game** | `legendary move ...` | Missing |
 | **Detailed Info** | `legendary info ...` | Basic view only |
 | **Export Formats** | CSV/JSON/TSV output | Missing |

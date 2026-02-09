@@ -327,7 +327,7 @@ impl EgsClient {
             .ok_or_else(|| anyhow::anyhow!("No account ID"))?;
 
         let url = format!(
-            "https://{}/ecommerce/api/public/platforms/EPIC/identities/{}/ownershipToken",
+            "https://{}/ecommerceintegration/api/public/platforms/EPIC/identities/{}/ownershipToken",
             ECOMMERCE_HOST, account_id
         );
 
@@ -413,5 +413,71 @@ impl EgsClient {
             ("token_type", "eg1"),
         ])?;
         Ok(token)
+    }
+
+    pub fn eula_get_status(&mut self, eula_id: &str) -> Result<Option<serde_json::Value>> {
+        self.refresh_if_needed()?;
+        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let account_id = self.get_account_id().unwrap_or_default();
+        let url = format!("https://{}/eulatracking/api/public/agreements/{}/account/{}", EULATRACKING_HOST, eula_id, account_id);
+
+        let response = self.client.get(&url)
+            .query(&[("includeAll", "true")])
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to fetch EULA status: {}", response.status()));
+        }
+
+        let json: serde_json::Value = response.json()?;
+        if json.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(None);
+        }
+        Ok(Some(json))
+    }
+
+    pub fn eula_accept(&mut self, eula_id: &str, version: i32, locale: Option<&str>) -> Result<()> {
+        self.refresh_if_needed()?;
+        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let account_id = self.get_account_id().unwrap_or_default();
+        let url = format!("https://{}/eulatracking/api/public/agreements/{}/version/{}/account/{}/accept", EULATRACKING_HOST, eula_id, version, account_id);
+
+        let mut req = self.client.post(&url)
+            .header(AUTHORIZATION, format!("bearer {}", token));
+
+        if let Some(l) = locale {
+            req = req.query(&[("locale", l)]);
+        }
+
+        let response = req.send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to accept EULA: {}", response.status()));
+        }
+
+        Ok(())
+    }
+
+    pub fn get_external_auths(&mut self) -> Result<serde_json::Value> {
+        self.refresh_if_needed()?;
+        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let account_id = self.get_account_id().unwrap_or_default();
+        let url = format!("https://{}/account/api/public/account/{}/externalAuths", OAUTH_HOST, account_id);
+
+        let response = self.client.get(&url)
+            .header(AUTHORIZATION, format!("bearer {}", token))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to fetch external auths: {}", response.status()));
+        }
+
+        let json: serde_json::Value = response.json()?;
+        Ok(json)
     }
 }
