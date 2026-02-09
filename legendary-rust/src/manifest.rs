@@ -104,7 +104,7 @@ pub fn parse_manifest(data: &[u8]) -> anyhow::Result<Manifest> {
     // Parse Meta
     let meta_start = body_cursor.position();
     let meta_size = body_cursor.read_u32::<LittleEndian>()?;
-    let data_version = body_cursor.read_u8()?;
+    let _data_version = body_cursor.read_u8()?;
     let _feature_level = body_cursor.read_u32::<LittleEndian>()?;
     let _is_file_data = body_cursor.read_u8()?;
     let _app_id = body_cursor.read_u32::<LittleEndian>()?;

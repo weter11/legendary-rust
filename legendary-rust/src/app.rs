@@ -1727,6 +1727,7 @@ impl LegendaryApp {
             worker_pause,
             running_processes: HashMap::new(),
             save_sync_status: None,
+            unaccepted_eulas: Vec::new(),
             install_info: None,
             selected_tags: HashSet::new(),
             current_task: None,
