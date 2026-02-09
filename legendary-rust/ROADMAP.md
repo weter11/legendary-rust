@@ -4,7 +4,7 @@ This document tracks features present in the original Python implementation of L
 
 ## Core Features
 - [ ] **Aliases**: Support for defining and using app name aliases.
-- [ ] **EULA Management**: Capability to view and accept EULAs required by some games.
+- [x] **EULA Management**: Capability to view and accept EULAs required by some games.
 - [ ] **Move Game**: Interactive or command-line utility to move installed game folders and update metadata.
 - [ ] **Cleanup**: Tooling to remove outdated manifests, temporary files, and orphaned metadata.
 - [ ] **Info View**: Detailed metadata and manifest information display (equivalent to `legendary info`).
@@ -14,7 +14,7 @@ This document tracks features present in the original Python implementation of L
 - [ ] **WebView Login**: Integrated WebView for a more streamlined login experience (currently SID/Code only).
 
 ## Third-Party Integration
-- [ ] **Partner Activation**: Activate games on Ubisoft Connect and Origin/EA App.
+- [x] **Partner Activation**: Activate games on Ubisoft Connect and Origin/EA App. (Detection and basic launch support)
 - [ ] **EGL Export**: Export legendary-managed game installations back to the Epic Games Launcher.
 - [ ] **Enhanced CrossOver Support**: Interactive bottle setup and configuration for macOS users.
 

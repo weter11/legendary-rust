@@ -44,6 +44,7 @@ pub struct LegendaryApp {
     manifest_files: Vec<String>,
     manifest_search_query: String,
     eos_status: crate::eos::EosOverlayStatus,
+    eos_prefix_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone)]
@@ -1420,41 +1421,41 @@ impl LegendaryApp {
                                 println!("      Executable: {:?}", exe_path);
                                 log::info!("Trying to launch: {:?}", exe_path);
 
-                                let use_umu = game_settings.map(|s| s.use_umu).unwrap_or(config.global.use_umu);
+                                let tool = game_settings.and_then(|s| s.compatibility_tool.clone())
+                                    .or_else(|| config.global.compatibility_tool.clone());
+                                let custom_path = game_settings.and_then(|s| s.custom_compatibility_path.clone())
+                                    .or_else(|| config.global.custom_compatibility_path.clone());
 
-                                let mut cmd = if use_umu && std::env::consts::OS == "linux" {
-                                    let mut c = std::process::Command::new("/usr/bin/umu-run");
-                                    let store = game_settings.and_then(|s| s.umu_store.clone())
-                                        .unwrap_or_else(|| config.global.umu_store.clone());
-                                    c.env("STORE", store);
-                                    c.env("GAMEID", "umu-default");
+                                let mut cmd = if std::env::consts::OS == "linux" {
+                                    let mut c = match tool {
+                                        Some(CompatibilityTool::UmuLauncher) => {
+                                            let mut command = std::process::Command::new("/usr/bin/umu-run");
+                                            let store = game_settings.and_then(|s| s.umu_store.clone())
+                                                .or_else(|| Some(config.global.umu_store.clone()))
+                                                .unwrap_or_else(|| "egs".to_string());
+                                            command.env("STORE", store);
+                                            command.env("GAMEID", "umu-default");
 
-                                    let pfx_path = if let Some(gs) = game_settings {
-                                        if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
-                                        else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
-                                        else { get_default_compat_data_path() }
-                                    } else if config.global.use_custom_pfx {
-                                        config.global.custom_pfx_path.clone()
-                                    } else {
-                                        get_default_compat_data_path()
-                                    };
+                                            let pfx_path = if let Some(gs) = game_settings {
+                                                if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
+                                                else if config.global.use_custom_pfx { config.global.custom_pfx_path.clone() }
+                                                else { get_default_compat_data_path() }
+                                            } else if config.global.use_custom_pfx {
+                                                config.global.custom_pfx_path.clone()
+                                            } else {
+                                                get_default_compat_data_path()
+                                            };
 
-                                    if let Some(path) = pfx_path {
-                                        c.env("WINEPREFIX", path);
-                                    }
-
-                                    if let Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) =
-                                        game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
-                                        if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
-                                            c.env("PROTONPATH", path);
+                                            if let Some(path) = pfx_path {
+                                                command.env("WINEPREFIX", path);
+                                            }
+                                            if let Some(path) = custom_path {
+                                                command.env("PROTONPATH", path);
+                                            }
+                                            command
                                         }
-                                    }
-                                    c.arg(&exe_path);
-                                    c
-                                } else if std::env::consts::OS == "linux" {
-                                    let mut c = match game_settings.and_then(|s| s.compatibility_tool.as_ref()) {
                                         Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) => {
-                                            if let Some(path) = game_settings.and_then(|s| s.custom_compatibility_path.as_ref()) {
+                                            if let Some(path) = custom_path {
                                                 let mut p = path.clone();
                                                 p.push("proton");
                                                 let is_proton = p.exists();
@@ -1514,7 +1515,7 @@ impl LegendaryApp {
                                                 command
                                             }
                                         }
-                                        Some(CompatibilityTool::SystemWine) | None => {
+                                        _ => {
                                             let mut command = std::process::Command::new("wine");
                                             let pfx_path = if let Some(gs) = game_settings {
                                                 if gs.use_custom_pfx { gs.custom_pfx_path.clone() }
@@ -1613,9 +1614,8 @@ impl LegendaryApp {
                                            "STEAM_COMPAT_CLIENT_INSTALL_PATH", "WINEPREFIX", "STEAM_COMPAT_DATA_PATH",
                                            "PROTONPATH", "STEAM_COMPAT_APP_ID", "APP_NAME"];
                                 for var in vars {
-                                    let val = cmd.get_envs().find(|(k, _)| k.to_str() == Some(var))
-                                        .and_then(|(_, v)| v)
-                                        .map(|v| v.to_string_lossy().into_owned())
+                                    let val = cmd.get_envs().find(|(k, _): &(&std::ffi::OsStr, Option<&std::ffi::OsStr>)| k.to_str() == Some(var))
+                                        .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
                                         .or_else(|| std::env::var(var).ok())
                                         .unwrap_or_default();
                                     println!("{}: {}", var, val);
@@ -1734,6 +1734,7 @@ impl LegendaryApp {
             manifest_files: Vec::new(),
             manifest_search_query: String::new(),
             eos_status: crate::eos::EosOverlayStatus::default(),
+            eos_prefix_path: None,
         }
     }
 }
@@ -1848,13 +1849,10 @@ impl eframe::App for LegendaryApp {
             }
         }
 
-        let is_task_running = self.current_task.is_some();
-
         egui::SidePanel::left("side_panel")
             .resizable(true)
             .default_width(150.0)
             .show(ctx, |ui| {
-            ui.set_enabled(!is_task_running);
             ui.heading("Legendary Rust");
             ui.add_space(10.0);
             if ui.selectable_label(self.current_view == View::Library, "Library").clicked() {
@@ -1863,7 +1861,7 @@ impl eframe::App for LegendaryApp {
             if ui.selectable_label(self.current_view == View::Settings, "Settings").clicked() {
                 self.current_view = View::Settings;
             }
-            if ui.selectable_label(self.current_view == View::Tasks, "Download Queue").clicked() {
+            if ui.selectable_label(self.current_view == View::Tasks, "Manager").clicked() {
                 self.current_view = View::Tasks;
             }
             if ui.selectable_label(self.current_view == View::EosOverlay, "EOS Overlay").clicked() {
@@ -1884,9 +1882,6 @@ impl eframe::App for LegendaryApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let is_task_running = self.current_task.is_some();
-            ui.set_enabled(!is_task_running || self.current_view == View::GameDetail);
-
             match self.current_view {
                 View::Auth => self.show_auth_view(ui),
                 View::Library => self.show_library_view(ui),
@@ -1920,7 +1915,7 @@ impl LegendaryApp {
     }
 
     fn show_tasks_view(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Download Queue");
+        ui.heading("Manager");
         ui.separator();
 
         if let Some(task) = self.current_task.clone() {
@@ -2230,7 +2225,7 @@ impl LegendaryApp {
 
                         if let Some(installed) = self.installed_games.iter().find(|g| g.app_name == app_name) {
                             ui.label(format!("Installed at: {}", installed.install_path));
-                            if ui.button("☁ Sync Cloud Saves").clicked() {
+                            if ui.button("☁ Compare local and cloud save files").clicked() {
                                 if let Some(item) = self.library.iter().find(|i| i.app_name == app_name) {
                                     let save_path = self.config.games.get(&app_name).and_then(|s| s.save_path.clone());
 
@@ -2262,6 +2257,9 @@ impl LegendaryApp {
                                     ui.label(format!("Save path: {}", save_path.to_string_lossy()));
                                     if ui.button("📁").clicked() {
                                         let _ = open::that(save_path);
+                                    }
+                                    if ui.button("Change").clicked() {
+                                        save_path_to_set = rfd::FileDialog::new().pick_folder();
                                     }
                                 });
                             } else {
@@ -2317,9 +2315,20 @@ impl LegendaryApp {
                             if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::SteamProton), "Steam Proton").changed() { changed = true; }
                             if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::CustomProtonWine), "Custom Proton/Wine").changed() { changed = true; }
                             if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::SystemWine), "System Wine").changed() { changed = true; }
+                            if ui.radio_value(&mut game_settings.compatibility_tool, Some(CompatibilityTool::UmuLauncher), "UMU Launcher").changed() { changed = true; }
                         });
 
                         match game_settings.compatibility_tool {
+                            Some(CompatibilityTool::UmuLauncher) => {
+                                ui.horizontal(|ui| {
+                                    ui.label("UMU Store ID (e.g. egs):");
+                                    let mut store_str = game_settings.umu_store.clone().unwrap_or_default();
+                                    if ui.text_edit_singleline(&mut store_str).changed() {
+                                        game_settings.umu_store = if store_str.is_empty() { None } else { Some(store_str) };
+                                        changed = true;
+                                    }
+                                });
+                            }
                             Some(CompatibilityTool::SteamProton) => {
                                 let protons = crate::config::find_steam_protons();
                                 egui::ComboBox::from_label("Proton Version")
@@ -2417,20 +2426,15 @@ impl LegendaryApp {
                 }
 
                 ui.add_space(10.0);
-                ui.group(|ui| {
+                ui.collapsing("Expandable Menu", |ui| {
                     let mut changed = false;
                     let game_settings = self.config.games.entry(app_name.clone()).or_default();
-
-                    ui.label("Additional Parameters:");
-                    if ui.text_edit_singleline(&mut game_settings.start_params).changed() {
-                        changed = true;
-                    }
 
                     if ui.checkbox(&mut game_settings.play_offline, "Play Offline").changed() {
                         changed = true;
                     }
 
-                    ui.add_space(10.0);
+                    ui.add_space(5.0);
                     ui.label("Custom Executable Path (optional):");
                     ui.horizontal(|ui| {
                         let mut exe_str = game_settings.custom_exe_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
@@ -2446,101 +2450,60 @@ impl LegendaryApp {
                         }
                     });
 
-                    ui.add_space(10.0);
-                    ui.label("Pre-launch Command:");
-                    if ui.text_edit_singleline(&mut game_settings.pre_launch_command).changed() {
-                        changed = true;
-                    }
-
+                    ui.add_space(5.0);
                     if ui.checkbox(&mut game_settings.eos_overlay_enabled, "Enable EOS Overlay").changed() {
                         changed = true;
                     }
 
                     ui.add_space(10.0);
-                    if ui.checkbox(&mut game_settings.use_umu, "Use UMU Launcher").changed() {
-                        changed = true;
-                    }
-
-                    if game_settings.use_umu {
+                    ui.collapsing("Manifest Files", |ui| {
                         ui.horizontal(|ui| {
-                            ui.label("UMU Store:");
-                            let mut store_str = game_settings.umu_store.clone().unwrap_or_default();
-                            if ui.text_edit_singleline(&mut store_str).changed() {
-                                game_settings.umu_store = if store_str.is_empty() { None } else { Some(store_str) };
-                                changed = true;
+                            if ui.button("Fetch/Refresh").clicked() {
+                                let catalog_item_id = self.library.iter().find(|i| i.app_name == app_name)
+                                    .map(|i| i.catalog_item_id.clone())
+                                    .unwrap_or_default();
+                                let _ = self.tx.send(WorkerMsg::ListFiles {
+                                    app_name: app_name.clone(),
+                                    catalog_item_id,
+                                });
+                            }
+                            ui.label("Search:");
+                            ui.text_edit_singleline(&mut self.manifest_search_query);
+                            if ui.button("×").clicked() {
+                                self.manifest_search_query.clear();
                             }
                         });
-                    }
+
+                        if !self.manifest_files.is_empty() {
+                            let query = self.manifest_search_query.to_lowercase();
+                            egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                                for file in &self.manifest_files {
+                                    if query.is_empty() || file.to_lowercase().contains(&query) {
+                                        ui.label(file);
+                                    }
+                                }
+                            });
+                        }
+                    });
 
                     ui.add_space(10.0);
-                    ui.collapsing("Steam Compatibility Settings", |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("STEAM_COMPAT_INSTALL_PATH:");
-                            let mut path_str = game_settings.steam_compat_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                            if ui.text_edit_singleline(&mut path_str).changed() {
-                                game_settings.steam_compat_install_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
-                                changed = true;
+                    ui.collapsing("Detailed Info", |ui| {
+                        if let Some(meta) = &local_meta {
+                            ui.label(format!("ID: {}", meta.metadata.id));
+                            ui.label(format!("Namespace: {}", meta.metadata.namespace));
+                            if let Some(did) = &meta.metadata.deployment_id {
+                                ui.label(format!("Deployment ID: {}", did));
                             }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("STEAM_COMPAT_CLIENT_INSTALL_PATH:");
-                            let mut path_str = game_settings.steam_compat_client_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                            if ui.text_edit_singleline(&mut path_str).changed() {
-                                game_settings.steam_compat_client_install_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
-                                changed = true;
+                            if let Some(attrs) = &meta.metadata.custom_attributes {
+                                for (k, v) in attrs {
+                                    ui.label(format!("{}: {}", k, v.value));
+                                }
                             }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("STEAM_COMPAT_DATA_PATH:");
-                            let mut path_str = game_settings.steam_compat_data_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                            if ui.text_edit_singleline(&mut path_str).changed() {
-                                game_settings.steam_compat_data_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
-                                changed = true;
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("STEAM_COMPAT_APP_ID:");
-                            let mut id_str = game_settings.steam_compat_app_id.clone().unwrap_or_default();
-                            if ui.text_edit_singleline(&mut id_str).changed() {
-                                game_settings.steam_compat_app_id = if id_str.is_empty() { None } else { Some(id_str) };
-                                changed = true;
-                            }
-                        });
+                        }
                     });
 
                     if changed {
                         let _ = self.config.save();
-                    }
-                });
-
-                ui.add_space(10.0);
-                ui.collapsing("Manifest Files", |ui| {
-                    ui.horizontal(|ui| {
-                        if ui.button("Fetch/Refresh").clicked() {
-                            let catalog_item_id = self.library.iter().find(|i| i.app_name == app_name)
-                                .map(|i| i.catalog_item_id.clone())
-                                .unwrap_or_default();
-                            let _ = self.tx.send(WorkerMsg::ListFiles {
-                                app_name: app_name.clone(),
-                                catalog_item_id,
-                            });
-                        }
-                        ui.label("Search:");
-                        ui.text_edit_singleline(&mut self.manifest_search_query);
-                        if ui.button("×").clicked() {
-                            self.manifest_search_query.clear();
-                        }
-                    });
-
-                    if !self.manifest_files.is_empty() {
-                        let query = self.manifest_search_query.to_lowercase();
-                        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                            for file in &self.manifest_files {
-                                if query.is_empty() || file.to_lowercase().contains(&query) {
-                                    ui.label(file);
-                                }
-                            }
-                        });
                     }
                 });
 
@@ -2574,11 +2537,10 @@ impl LegendaryApp {
                 }
 
                 ui.horizontal(|ui| {
-                    let is_task_running = self.current_task.is_some();
                     let is_running = self.running_processes.contains_key(&app_name);
                     let button_text = if is_running { "Stop Game" } else { "Start Game" };
 
-                    ui.add_enabled_ui(!is_task_running, |ui| {
+                    ui.vertical(|ui| {
                         if ui.button(egui::RichText::new(button_text).size(24.0).strong()).clicked() {
                             if is_running {
                                 if let Some(mut child) = self.running_processes.remove(&app_name) {
@@ -2604,12 +2566,24 @@ impl LegendaryApp {
 
                         let is_installed = self.installed_games.iter().any(|g| g.app_name == app_name);
                         if !is_installed {
-                            if ui.button(egui::RichText::new("Install").size(24.0).strong()).clicked() {
-                                let _ = self.tx.send(WorkerMsg::FetchInstallInfo {
-                                    app_name: app_name.clone(),
-                                    title: game.title.clone(),
-                                });
-                            }
+                            ui.horizontal(|ui| {
+                                if ui.button(egui::RichText::new("Install").size(24.0).strong()).clicked() {
+                                    let _ = self.tx.send(WorkerMsg::FetchInstallInfo {
+                                        app_name: app_name.clone(),
+                                        title: game.title.clone(),
+                                    });
+                                }
+                                if ui.button(egui::RichText::new("Verify").size(24.0).strong()).clicked() {
+                                    let catalog_item_id = self.library.iter().find(|i| i.app_name == app_name)
+                                        .map(|i| i.catalog_item_id.clone())
+                                        .unwrap_or_default();
+                                    let _ = self.tx.send(WorkerMsg::VerifyGame {
+                                        app_name: app_name.clone(),
+                                        catalog_item_id
+                                    });
+                                    self.current_view = View::Tasks;
+                                }
+                            });
                         } else {
                             if ui.button("Verify").clicked() {
                                 let catalog_item_id = self.library.iter().find(|i| i.app_name == app_name)
@@ -2995,6 +2969,26 @@ impl LegendaryApp {
         ui.heading("EOS Overlay Manager");
         ui.separator();
 
+        ui.horizontal(|ui| {
+            ui.label("Manage Prefix:");
+            let _path_str = self.eos_prefix_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "Default Prefix".to_string());
+            if ui.selectable_label(self.eos_prefix_path.is_none(), "Default").clicked() {
+                self.eos_prefix_path = None;
+                let _ = self.tx.send(WorkerMsg::QueryEosStatus { prefix: None });
+            }
+            if ui.button("Browse...").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.eos_prefix_path = Some(path.clone());
+                    let _ = self.tx.send(WorkerMsg::QueryEosStatus { prefix: Some(path) });
+                }
+            }
+            if let Some(p) = &self.eos_prefix_path {
+                ui.label(p.to_string_lossy());
+            }
+        });
+
+        ui.add_space(10.0);
+
         ui.group(|ui| {
             ui.heading("Status");
             ui.horizontal(|ui| {
@@ -3027,7 +3021,7 @@ impl LegendaryApp {
 
             ui.add_space(5.0);
             ui.horizontal(|ui| {
-                ui.label("Registry Status (Default Prefix):");
+                ui.label("Registry Status:");
                 if let Some(reg_path) = &self.eos_status.registry_path {
                     ui.colored_label(egui::Color32::GREEN, format!("Configured ({})", reg_path));
                 } else {
@@ -3042,10 +3036,11 @@ impl LegendaryApp {
                     ui.horizontal(|ui| {
                         ui.label(path);
                         if ui.button("Use this").clicked() {
-                            if let Some(prefix) = get_default_compat_data_path() {
+                            let prefix = self.eos_prefix_path.clone().or_else(get_default_compat_data_path);
+                            if let Some(p) = prefix {
                                 let _ = self.tx.send(WorkerMsg::UpdateEosRegistry {
                                     overlay_path: path.clone(),
-                                    prefix,
+                                    prefix: p,
                                     enable: true
                                 });
                             }
@@ -3056,20 +3051,22 @@ impl LegendaryApp {
 
             if self.eos_status.installed {
                 ui.horizontal(|ui| {
-                    if ui.button("Enable in Default Prefix").clicked() {
-                        if let (Some(path), Some(prefix)) = (&self.eos_status.install_path, get_default_compat_data_path()) {
+                    if ui.button("Enable in Prefix").clicked() {
+                        let prefix = self.eos_prefix_path.clone().or_else(get_default_compat_data_path);
+                        if let (Some(path), Some(p)) = (&self.eos_status.install_path, prefix) {
                             let _ = self.tx.send(WorkerMsg::UpdateEosRegistry {
                                 overlay_path: path.clone(),
-                                prefix,
+                                prefix: p,
                                 enable: true
                             });
                         }
                     }
-                    if ui.button("Disable in Default Prefix").clicked() {
-                        if let Some(prefix) = get_default_compat_data_path() {
+                    if ui.button("Disable in Prefix").clicked() {
+                        let prefix = self.eos_prefix_path.clone().or_else(get_default_compat_data_path);
+                        if let Some(p) = prefix {
                             let _ = self.tx.send(WorkerMsg::UpdateEosRegistry {
                                 overlay_path: String::new(),
-                                prefix,
+                                prefix: p,
                                 enable: false
                             });
                         }
@@ -3133,27 +3130,58 @@ impl LegendaryApp {
                     }
                 });
             }
-            ui.add_space(10.0);
-            ui.label("Global Pre-launch Command:");
-            if ui.text_edit_singleline(&mut self.config.global.pre_launch_command).changed() {
-                changed = true;
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.radio_value(&mut self.config.global.compatibility_tool, Some(CompatibilityTool::SteamProton), "Steam Proton").changed() { changed = true; }
+                if ui.radio_value(&mut self.config.global.compatibility_tool, Some(CompatibilityTool::CustomProtonWine), "Custom Proton/Wine").changed() { changed = true; }
+                if ui.radio_value(&mut self.config.global.compatibility_tool, Some(CompatibilityTool::SystemWine), "System Wine").changed() { changed = true; }
+                if ui.radio_value(&mut self.config.global.compatibility_tool, Some(CompatibilityTool::UmuLauncher), "UMU Launcher").changed() { changed = true; }
+            });
+
+            match self.config.global.compatibility_tool {
+                Some(CompatibilityTool::UmuLauncher) => {
+                    ui.horizontal(|ui| {
+                        ui.label("Default UMU Store ID (e.g. egs):");
+                        if ui.text_edit_singleline(&mut self.config.global.umu_store).changed() {
+                            changed = true;
+                        }
+                    });
+                }
+                Some(CompatibilityTool::SteamProton) => {
+                    let protons = crate::config::find_steam_protons();
+                    egui::ComboBox::from_label("Default Proton Version")
+                        .selected_text(self.config.global.custom_compatibility_path.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy()).unwrap_or_else(|| "Select Proton".into()))
+                        .show_ui(ui, |ui| {
+                            for p in protons {
+                                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                if ui.selectable_value(&mut self.config.global.custom_compatibility_path, Some(p), name).changed() { changed = true; }
+                            }
+                        });
+                }
+                Some(CompatibilityTool::CustomProtonWine) => {
+                    let wines = crate::config::find_custom_wines();
+                    egui::ComboBox::from_label("Default Wine/Proton Version")
+                        .selected_text(self.config.global.custom_compatibility_path.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy()).unwrap_or_else(|| "Select Tool".into()))
+                        .show_ui(ui, |ui| {
+                            for w in wines {
+                                let name = w.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                if ui.selectable_value(&mut self.config.global.custom_compatibility_path, Some(w), name).changed() { changed = true; }
+                            }
+                            if ui.button("Custom Path...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                    self.config.global.custom_compatibility_path = Some(path);
+                                    changed = true;
+                                }
+                            }
+                        });
+                }
+                _ => {}
             }
+
+            ui.add_space(10.0);
             if ui.checkbox(&mut self.config.global.eos_overlay_enabled, "Enable EOS Overlay by default").changed() {
                 changed = true;
-            }
-
-            ui.add_space(10.0);
-            if ui.checkbox(&mut self.config.global.use_umu, "Use UMU Launcher by default").changed() {
-                changed = true;
-            }
-
-            if self.config.global.use_umu {
-                ui.horizontal(|ui| {
-                    ui.label("Default UMU Store:");
-                    if ui.text_edit_singleline(&mut self.config.global.umu_store).changed() {
-                        changed = true;
-                    }
-                });
             }
 
             ui.add_space(10.0);
