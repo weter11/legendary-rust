@@ -42,6 +42,7 @@ impl EgsClient {
 
         let client = reqwest::blocking::Client::builder()
             .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
         Ok(Self {
@@ -252,6 +253,7 @@ impl EgsClient {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
         let url = format!("https://{}/cloudstorage/api/storage/{}/{}/{}", DATASTORAGE_HOST, namespace, account_id, app_id);
+        println!("[CloudSaves] Fetching metadata from: {}", url);
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
