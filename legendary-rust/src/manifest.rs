@@ -296,7 +296,7 @@ pub fn parse_chunk(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 
     let header_version = cursor.read_u32::<LittleEndian>()?;
     let header_size = cursor.read_u32::<LittleEndian>()?;
-    let compressed_size = cursor.read_u32::<LittleEndian>()?;
+    let _compressed_size = cursor.read_u32::<LittleEndian>()?;
     let mut _guid = [0u32; 4];
     for i in 0..4 {
         _guid[i] = cursor.read_u32::<LittleEndian>()?;

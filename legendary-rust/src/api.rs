@@ -2,6 +2,7 @@ use crate::models::*;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use anyhow::Result;
 use serde_json;
+use std::collections::HashMap;
 
 const OAUTH_HOST: &str = "account-public-service-prod03.ol.epicgames.com";
 const LAUNCHER_HOST: &str = "launcher-public-service-prod06.ol.epicgames.com";
