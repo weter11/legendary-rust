@@ -9,7 +9,7 @@ const ENTITLEMENT_HOST: &str = "entitlement-public-service-prod08.ol.epicgames.c
 const EULATRACKING_HOST: &str = "eulatracking-public-service-prod06.ol.epicgames.com";
 const CATALOG_HOST: &str = "catalog-public-service-prod06.ol.epicgames.com";
 const ECOMMERCE_HOST: &str = "ecommerceintegration-public-service-ecomprod02.ol.epicgames.com";
-const DATASTORAGE_HOST: &str = "datastorage-public-service-liveegs.live.use1a.on.epicgames.com";
+const DATASTORAGE_HOST: &str = "cloudstorage-public-service-prod06.ol.epicgames.com";
 const LIBRARY_HOST: &str = "library-service.live.use1a.on.epicgames.com";
 
 pub const UA_DEFAULT: &str = "UELauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit";
@@ -258,16 +258,26 @@ impl EgsClient {
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
-        if response.status() == 404 {
+        let status = response.status();
+        println!("[CloudSaves] Metadata response status: {}", status);
+
+        if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(Vec::new());
         }
 
-        if !response.status().is_success() {
+        if !status.is_success() {
             let err_text = response.text()?;
-            return Err(anyhow::anyhow!("Failed to fetch cloud saves: {}", err_text));
+            println!("[CloudSaves] Metadata fetch failed: {}", err_text);
+            return Err(anyhow::anyhow!("Failed to fetch cloud saves: {} - {}", status, err_text));
         }
 
-        let files: Vec<CloudSaveFile> = response.json()?;
+        let body = response.text()?;
+        println!("[CloudSaves] Metadata response body length: {}", body.len());
+        if body.len() < 500 {
+            println!("[CloudSaves] Metadata response body: {}", body);
+        }
+
+        let files: Vec<CloudSaveFile> = serde_json::from_str(&body)?;
         Ok(files)
     }
 

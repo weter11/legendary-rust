@@ -780,48 +780,43 @@ impl LegendaryApp {
 
                         let local_time = save_path.as_ref().and_then(|p| get_latest_local_save_time(p));
 
-                        if let Some(token) = crate::auth::load_token().ok() {
-                            match client.get_cloud_save_metadata(&namespace, &token.account_id, &app_name) {
-                                Ok(files) => {
-                                    let mut remote_time = None;
-                                    for file in &files {
-                                        if let Ok(dt) = DateTime::parse_from_rfc3339(&file.last_modified) {
-                                            let dt_utc = dt.with_timezone(&Utc);
-                                            if remote_time.is_none() || dt_utc > remote_time.unwrap() {
-                                                remote_time = Some(dt_utc);
-                                            }
+                        let result = if let Some(token) = crate::auth::load_token().ok() {
+                            client.get_cloud_save_metadata(&namespace, &token.account_id, &app_name)
+                        } else {
+                            Err(anyhow::anyhow!("No authentication token found"))
+                        };
+
+                        match result {
+                            Ok(files) => {
+                                let mut remote_time = None;
+                                for file in &files {
+                                    if let Ok(dt) = DateTime::parse_from_rfc3339(&file.last_modified) {
+                                        let dt_utc = dt.with_timezone(&Utc);
+                                        if remote_time.is_none() || dt_utc > remote_time.unwrap() {
+                                            remote_time = Some(dt_utc);
                                         }
                                     }
+                                }
 
-                                    let _ = tx.send(WorkerResponse::SaveSyncStatusFetched {
-                                        app_name: app_name.clone(),
-                                        files,
-                                        local_time,
-                                        remote_time,
-                                        error: None,
-                                    });
-                                    let _ = tx.send(WorkerResponse::TaskFinished(format!("Checked cloud saves for {}", app_name)));
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(WorkerResponse::SaveSyncStatusFetched {
-                                        app_name: app_name.clone(),
-                                        files: Vec::new(),
-                                        local_time,
-                                        remote_time: None,
-                                        error: Some(e.to_string()),
-                                    });
-                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to check cloud saves for {}: {}", app_name, e)));
-                                }
+                                let _ = tx.send(WorkerResponse::SaveSyncStatusFetched {
+                                    app_name: app_name.clone(),
+                                    files,
+                                    local_time,
+                                    remote_time,
+                                    error: None,
+                                });
+                                let _ = tx.send(WorkerResponse::TaskFinished(format!("Checked cloud saves for {}", app_name)));
                             }
-                        } else {
-                            let _ = tx.send(WorkerResponse::SaveSyncStatusFetched {
-                                app_name: app_name.clone(),
-                                files: Vec::new(),
-                                local_time,
-                                remote_time: None,
-                                error: Some("No authentication token found".to_string()),
-                            });
-                            let _ = tx.send(WorkerResponse::Error("Not logged in".to_string()));
+                            Err(e) => {
+                                let _ = tx.send(WorkerResponse::SaveSyncStatusFetched {
+                                    app_name: app_name.clone(),
+                                    files: Vec::new(),
+                                    local_time,
+                                    remote_time: None,
+                                    error: Some(e.to_string()),
+                                });
+                                let _ = tx.send(WorkerResponse::Error(format!("Failed to check cloud saves for {}: {}", app_name, e)));
+                            }
                         }
                         ctx_clone.request_repaint();
                     }
@@ -2620,6 +2615,14 @@ impl LegendaryApp {
                     let game_settings = self.config.games.entry(app_name.clone()).or_default();
 
                     if let Some(info) = &self.advanced_info {
+                        if let Some(p) = &info.prefix_path {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Current prefix in use: {}", p.to_string_lossy()));
+                                if ui.button("Open Folder").clicked() {
+                                    let _ = open::that(p);
+                                }
+                            });
+                        }
                         if let Some(p) = &info.save_path {
                             ui.horizontal(|ui| {
                                 ui.label(format!("Discovered save folder path: {}", p.to_string_lossy()));
@@ -2627,9 +2630,6 @@ impl LegendaryApp {
                                     let _ = open::that(p);
                                 }
                             });
-                        }
-                        if let Some(p) = &info.prefix_path {
-                            ui.label(format!("Current prefix in use: {}", p.to_string_lossy()));
                         }
                         if let Some(p) = &info.dlss_path {
                             ui.horizontal(|ui| {
@@ -3084,113 +3084,6 @@ impl LegendaryApp {
                         }
                     }
 
-                    if false { // Hide resolve button as it is automatic now
-                        let mut resolved_path = None;
-                        let mut folder_hint = None;
-
-                        // Try to get folder hint from metadata
-                        let local_meta = crate::auth::load_local_metadata(&status.app_name);
-                        if let Some(meta) = local_meta {
-                            if let Some(attrs) = meta.metadata.custom_attributes {
-                                if let Some(attr) = attrs.get("CloudSaveFolder") {
-                                    folder_hint = Some(attr.value.clone());
-                                }
-                            }
-                        }
-
-                        if folder_hint.is_none() {
-                            folder_hint = Some(status.app_name.clone());
-                        }
-
-                        let account_id = self.token.as_ref().map(|t| t.account_id.clone());
-
-                        if let Some(hint) = folder_hint {
-                            if std::env::consts::OS == "linux" {
-                                if let Some(mut p) = get_default_compat_data_path() {
-                                    p.push("pfx/drive_c/users/steamuser/AppData/Local");
-                                    p.push(&hint);
-
-                                    // Try hint directly, or with account ID subfolder
-                                    if p.exists() {
-                                        if let Some(ref aid) = account_id {
-                                            let mut p_aid = p.clone();
-                                            p_aid.push(aid);
-                                            if p_aid.exists() {
-                                                resolved_path = Some(p_aid);
-                                            } else {
-                                                // Try Saved/SaveGames/AccountID (common for many games)
-                                                let mut p_saved = p.clone();
-                                                p_saved.push("Saved/SaveGames");
-                                                p_saved.push(aid);
-                                                if p_saved.exists() {
-                                                    resolved_path = Some(p_saved);
-                                                } else {
-                                                    resolved_path = Some(p);
-                                                }
-                                            }
-                                        } else {
-                                            resolved_path = Some(p);
-                                        }
-                                    } else {
-                                        // Try common variants
-                                        p.pop();
-                                        let hint_no_space = hint.replace(" ", "");
-                                        p.push(&hint_no_space);
-                                        if p.exists() {
-                                            if let Some(ref aid) = account_id {
-                                                let mut p_aid = p.clone();
-                                                p_aid.push(aid);
-                                                if p_aid.exists() {
-                                                    resolved_path = Some(p_aid);
-                                                } else {
-                                                    let mut p_saved = p.clone();
-                                                    p_saved.push("Saved/SaveGames");
-                                                    p_saved.push(aid);
-                                                    if p_saved.exists() {
-                                                        resolved_path = Some(p_saved);
-                                                    } else {
-                                                        resolved_path = Some(p);
-                                                    }
-                                                }
-                                            } else {
-                                                resolved_path = Some(p);
-                                            }
-                                        }
-                                    }
-                                }
-                            } else if std::env::consts::OS == "windows" {
-                                if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-                                    let mut p = std::path::PathBuf::from(local_app_data);
-                                    p.push(&hint);
-                                    if p.exists() {
-                                        if let Some(ref aid) = account_id {
-                                            let mut p_aid = p.clone();
-                                            p_aid.push(aid);
-                                            if p_aid.exists() {
-                                                resolved_path = Some(p_aid);
-                                            } else {
-                                                let mut p_saved = p.clone();
-                                                p_saved.push("Saved/SaveGames");
-                                                p_saved.push(aid);
-                                                if p_saved.exists() {
-                                                    resolved_path = Some(p_saved);
-                                                } else {
-                                                    resolved_path = Some(p);
-                                                }
-                                            }
-                                        } else {
-                                            resolved_path = Some(p);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(p) = resolved_path {
-                            game_settings.save_path = Some(p);
-                            changed = true;
-                        }
-                    }
 
                     if changed {
                         let _ = self.config.save();
