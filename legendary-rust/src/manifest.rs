@@ -5,6 +5,7 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::collections::HashMap;
 use hex;
+use sha1::{Sha1, Digest};
 
 pub struct Manifest {
     pub manifest_version: u32,
@@ -474,7 +475,7 @@ impl Manifest {
         let compressed_body = encoder.finish()?;
         let compressed_size = compressed_body.len() as u32;
 
-        let mut hasher = sha1::Sha1::new();
+        let mut hasher = Sha1::new();
         hasher.update(&body);
         let sha_hash = hasher.finalize();
 
@@ -520,7 +521,6 @@ pub fn serialize_chunk(raw_data: &[u8], guid: [u32; 4], rolling_hash: u64, sha_h
 pub fn parse_chunk(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut cursor = Cursor::new(data);
 
-    // Reviewer: "chunk magic number 0xB1FE3AA2 is read as LittleEndian, but the Epic Games chunk format uses Big Endian for this signature."
     let magic = cursor.read_u32::<BigEndian>()?;
     if magic != 0xB1FE3AA2 {
         return Err(anyhow::anyhow!("Invalid chunk magic: {:08X}", magic));
@@ -569,7 +569,6 @@ pub fn parse_chunk(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     };
 
     if let Some(expected) = expected_sha {
-        use sha1::{Sha1, Digest};
         let mut hasher = Sha1::new();
 
         let mut padded_data = final_data.clone();

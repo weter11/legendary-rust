@@ -10,7 +10,7 @@ use crate::models::InstalledGame;
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
-use chrono::{DateTime, Utc, SecondsFormat};
+use chrono::{DateTime, Utc};
 
 use crate::config::{AppConfig, CompatibilityTool};
 
@@ -864,7 +864,7 @@ impl LegendaryApp {
                         }
                         ctx_clone.request_repaint();
                     }
-                    WorkerMsg::UploadCloudSave { app_name, namespace, save_path } => {
+                    WorkerMsg::UploadCloudSave { app_name, namespace: _, save_path } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Packaging and uploading saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                         if let Ok(token) = crate::auth::load_token() {
                             let mut files_to_package = get_all_files(&save_path);
@@ -1164,7 +1164,6 @@ impl LegendaryApp {
 
                                             // Verify file SHA1
                                             {
-                                                use sha1::{Sha1, Digest};
                                                 let mut hasher = Sha1::new();
                                                 hasher.update(&file_data);
                                                 let actual_hash = hasher.finalize();
