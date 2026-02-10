@@ -1,5 +1,7 @@
 mod api;
 mod app;
+mod worker;
+mod ui;
 mod utils;
 mod auth;
 mod config;
