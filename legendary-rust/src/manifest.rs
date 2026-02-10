@@ -1,7 +1,8 @@
 use std::io::{Read, Cursor, Seek, SeekFrom};
-use byteorder::{LittleEndian, ReadBytesExt};
+use byteorder::{LittleEndian, BigEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
 use std::collections::HashMap;
+use hex;
 
 pub struct Manifest {
     pub manifest_version: u32,
@@ -289,7 +290,8 @@ fn read_fstring<R: Read>(mut reader: R) -> anyhow::Result<String> {
 pub fn parse_chunk(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut cursor = Cursor::new(data);
 
-    let magic = cursor.read_u32::<LittleEndian>()?;
+    // Reviewer: "chunk magic number 0xB1FE3AA2 is read as LittleEndian, but the Epic Games chunk format uses Big Endian for this signature."
+    let magic = cursor.read_u32::<BigEndian>()?;
     if magic != 0xB1FE3AA2 {
         return Err(anyhow::anyhow!("Invalid chunk magic: {:08X}", magic));
     }
@@ -304,9 +306,11 @@ pub fn parse_chunk(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let _hash = cursor.read_u64::<LittleEndian>()?;
     let stored_as = cursor.read_u8()?;
 
+    let mut expected_sha: Option<[u8; 20]> = None;
     if header_version >= 2 {
-        let mut _sha_hash = [0u8; 20];
-        cursor.read_exact(&mut _sha_hash)?;
+        let mut sha_hash = [0u8; 20];
+        cursor.read_exact(&mut sha_hash)?;
+        expected_sha = Some(sha_hash);
         let _hash_type = cursor.read_u8()?;
     }
 
@@ -327,10 +331,34 @@ pub fn parse_chunk(data: &[u8]) -> anyhow::Result<Vec<u8>> {
         data[cursor.position() as usize..].to_vec()
     };
 
-    if chunk_data.len() > uncompressed_size as usize {
+    let final_data = if chunk_data.len() > uncompressed_size as usize {
         // Legendary pads chunks to 1MiB with zeros, but we might only want the actual data if uncompressed_size is set correctly
-        Ok(chunk_data[..uncompressed_size as usize].to_vec())
+        chunk_data[..uncompressed_size as usize].to_vec()
     } else {
-        Ok(chunk_data)
+        chunk_data
+    };
+
+    if let Some(expected) = expected_sha {
+        use sha1::{Sha1, Digest};
+        let mut hasher = Sha1::new();
+
+        let mut padded_data = final_data.clone();
+        if padded_data.len() < 1024 * 1024 {
+            padded_data.resize(1024 * 1024, 0);
+        }
+        hasher.update(&padded_data);
+        let actual = hasher.finalize();
+        if actual.as_slice() != &expected {
+            // Try without padding just in case
+            let mut hasher2 = Sha1::new();
+            hasher2.update(&final_data);
+            let actual2 = hasher2.finalize();
+            if actual2.as_slice() != &expected {
+                return Err(anyhow::anyhow!("Chunk SHA1 mismatch. Expected: {}, Actual (padded): {}, Actual (raw): {}",
+                    hex::encode(expected), hex::encode(actual), hex::encode(actual2)));
+            }
+        }
     }
+
+    Ok(final_data)
 }

@@ -1003,10 +1003,34 @@ impl LegendaryApp {
                                             }
                                             if !success { break; }
 
-                                            if let Err(e) = std::fs::write(&target_file_path, file_data) {
+                                            // Verify file SHA1
+                                            {
+                                                use sha1::{Sha1, Digest};
+                                                let mut hasher = Sha1::new();
+                                                hasher.update(&file_data);
+                                                let actual_hash = hasher.finalize();
+                                                if actual_hash.as_slice() != &file_manifest.hash {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("File SHA1 mismatch: {}", file_manifest.filename)));
+                                                    success = false;
+                                                    break;
+                                                }
+                                            }
+
+                                            if let Err(e) = std::fs::write(&target_file_path, &file_data) {
                                                 let _ = tx.send(WorkerResponse::Error(format!("Failed to write file {}: {}", file_manifest.filename, e)));
                                                 success = false;
                                                 break;
+                                            }
+
+                                            // Set modification time from manifest timestamp
+                                            if let Some(timestamp_str) = file.manifest_name.strip_suffix(".manifest") {
+                                                if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(timestamp_str, "%Y.%m.%d-%H.%M.%S") {
+                                                    let dt = naive_dt.and_utc();
+                                                    let system_time: std::time::SystemTime = dt.into();
+                                                    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&target_file_path) {
+                                                        let _ = f.set_times(std::fs::FileTimes::new().set_modified(system_time).set_accessed(system_time));
+                                                    }
+                                                }
                                             }
                                         }
                                         if !success { break; }
