@@ -1,6 +1,8 @@
 use crate::models::*;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use anyhow::Result;
+use serde_json;
+use std::collections::HashMap;
 
 const OAUTH_HOST: &str = "account-public-service-prod03.ol.epicgames.com";
 const LAUNCHER_HOST: &str = "launcher-public-service-prod06.ol.epicgames.com";
@@ -24,7 +26,7 @@ pub fn get_ua_for_app(app_name: &str) -> &'static str {
 }
 
 pub struct EgsClient {
-    client: reqwest::blocking::Client,
+    pub client: reqwest::blocking::Client,
     user_basic: String,
     pw_basic: String,
     token_info: Option<OAuthToken>,
@@ -249,17 +251,20 @@ impl EgsClient {
         Ok(info)
     }
 
-    pub fn get_cloud_save_metadata(&mut self, namespace: &str, account_id: &str, app_id: &str) -> Result<Vec<CloudSaveFile>> {
+    pub fn get_cloud_save_metadata(&mut self, _namespace: &str, account_id: &str, app_id: &str) -> Result<Vec<CloudSaveFile>> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://{}/cloudstorage/api/storage/{}/{}/{}", DATASTORAGE_HOST, namespace, account_id, app_id);
-        println!("[CloudSaves] Fetching metadata from: {}", url);
+        let token = self.token_info.as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+
+        let url = format!("https://{}/api/v1/access/egstore/savesync/{}/{}/",
+            DATASTORAGE_HOST, account_id, app_id);
+
         let response = self.client.get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
         let status = response.status();
-        println!("[CloudSaves] Metadata response status: {}", status);
 
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(Vec::new());
@@ -267,28 +272,68 @@ impl EgsClient {
 
         if !status.is_success() {
             let err_text = response.text()?;
-            println!("[CloudSaves] Metadata fetch failed: {}", err_text);
             return Err(anyhow::anyhow!("Failed to fetch cloud saves: {} - {}", status, err_text));
         }
 
         let body = response.text()?;
-        println!("[CloudSaves] Metadata response body length: {}", body.len());
-        if body.len() < 500 {
-            println!("[CloudSaves] Metadata response body: {}", body);
+
+        let json: serde_json::Value = serde_json::from_str(&body)?;
+        let save_response: CloudSaveResponse = serde_json::from_value(json)?;
+
+        let mut files = Vec::new();
+        for (filename, mut file_info) in save_response.files {
+            // Filter for manifest files only as requested
+            if !filename.contains(".manifest") {
+                continue;
+            }
+
+            let parts: Vec<&str> = filename.split('/').collect();
+            if parts.len() >= 5 {
+                file_info.app_name = parts[2].to_string();
+                file_info.file_name = filename.clone();
+                file_info.manifest_name = parts[4].to_string();
+                files.push(file_info);
+            } else {
+                if file_info.file_name.is_empty() {
+                    file_info.file_name = filename;
+                }
+                files.push(file_info);
+            }
         }
 
-        let files: Vec<CloudSaveFile> = serde_json::from_str(&body)?;
         Ok(files)
     }
 
-    pub fn download_cloud_file(&mut self, namespace: &str, account_id: &str, app_id: &str, filename: &str) -> Result<Vec<u8>> {
+    pub fn get_cloud_save_links(&mut self, account_id: &str, app_id: &str, filenames: &[String]) -> Result<HashMap<String, CloudSaveFile>> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://{}/cloudstorage/api/storage/{}/{}/{}/{}", DATASTORAGE_HOST, namespace, account_id, app_id, filename);
-        let response = self.client.get(&url)
+
+        let url = format!("https://{}/api/v1/access/egstore/savesync/{}/{}/", DATASTORAGE_HOST, account_id, app_id);
+        let response = self.client.post(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
+            .json(&serde_json::json!({"files": filenames}))
             .send()?;
 
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to get cloud save links: {}", response.status()));
+        }
+
+        let body = response.text()?;
+        let json: serde_json::Value = serde_json::from_str(&body)?;
+        let save_response: CloudSaveResponse = serde_json::from_value(json)?;
+        Ok(save_response.files)
+    }
+
+    pub fn download_cloud_file(&mut self, _namespace: &str, account_id: &str, app_id: &str, filename: &str) -> Result<Vec<u8>> {
+        let links = self.get_cloud_save_links(account_id, app_id, &[filename.to_string()])?;
+
+        let file = links.get(filename)
+            .ok_or_else(|| anyhow::anyhow!("File {} not found in metadata", filename))?;
+
+        let download_url = file.read_link.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No readLink provided for {}", filename))?;
+
+        let response = self.client.get(download_url).send()?;
         if !response.status().is_success() {
             return Err(anyhow::anyhow!("Failed to download cloud file: {}", response.status()));
         }
@@ -296,12 +341,32 @@ impl EgsClient {
         Ok(response.bytes()?.to_vec())
     }
 
-    pub fn upload_cloud_file(&mut self, namespace: &str, account_id: &str, app_id: &str, filename: &str, data: Vec<u8>) -> Result<()> {
+    pub fn upload_cloud_file(&mut self, _namespace: &str, account_id: &str, app_id: &str, filename: &str, data: Vec<u8>) -> Result<()> {
         self.refresh_if_needed()?;
         let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://{}/cloudstorage/api/storage/{}/{}/{}/{}", DATASTORAGE_HOST, namespace, account_id, app_id, filename);
-        let response = self.client.put(&url)
+
+        // First get the upload URL
+        let url = format!("https://{}/api/v1/access/egstore/savesync/{}/{}/", DATASTORAGE_HOST, account_id, app_id);
+        let response = self.client.post(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
+            .json(&serde_json::json!({"files": [filename]}))
+            .send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to get upload URL: {}", response.status()));
+        }
+
+        let body = response.text()?;
+        let json: serde_json::Value = serde_json::from_str(&body)?;
+        let response: CloudSaveResponse = serde_json::from_value(json)?;
+
+        let file = response.files.get(filename)
+            .ok_or_else(|| anyhow::anyhow!("File {} not found in metadata", filename))?;
+
+        let upload_url = file.write_link.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No writeLink provided for {}", filename))?;
+
+        let response = self.client.put(upload_url)
             .body(data)
             .send()?;
 

@@ -16,6 +16,8 @@ use crate::config::{AppConfig, CompatibilityTool};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use rand::Rng;
+use sha1::{Sha1, Digest};
 
 pub struct LegendaryApp {
     token: Option<OAuthToken>,
@@ -46,11 +48,15 @@ pub struct LegendaryApp {
     eos_status: crate::eos::EosOverlayStatus,
     eos_prefix_path: Option<std::path::PathBuf>,
     advanced_info: Option<AdvancedInfo>,
+    new_env_key: String,
+    new_env_val: String,
 }
 
 #[derive(Clone, Default)]
 pub struct AdvancedInfo {
+    pub app_name: String,
     pub save_path: Option<std::path::PathBuf>,
+    pub backup_path: Option<std::path::PathBuf>,
     pub prefix_path: Option<std::path::PathBuf>,
     pub dlss_path: Option<std::path::PathBuf>,
     pub dlssd_path: Option<std::path::PathBuf>,
@@ -71,6 +77,7 @@ pub struct SaveSyncStatus {
     pub files: Vec<crate::models::CloudSaveFile>,
     pub local_time: Option<DateTime<Utc>>,
     pub remote_time: Option<DateTime<Utc>>,
+    pub backup_time: Option<DateTime<Utc>>,
     pub loading: bool,
     pub error: Option<String>,
 }
@@ -108,6 +115,7 @@ pub(crate) enum WorkerMsg {
         app_name: String,
         namespace: String,
         save_path: Option<std::path::PathBuf>,
+        backup_path: Option<std::path::PathBuf>,
     },
     CheckEula(Vec<String>),
     AcceptEula {
@@ -158,6 +166,11 @@ pub(crate) enum WorkerMsg {
         prefix: std::path::PathBuf,
         enable: bool,
     },
+    CreateLocalBackup {
+        app_name: String,
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
 }
 
 pub(crate) enum WorkerResponse {
@@ -184,6 +197,7 @@ pub(crate) enum WorkerResponse {
         files: Vec<crate::models::CloudSaveFile>,
         local_time: Option<DateTime<Utc>>,
         remote_time: Option<DateTime<Utc>>,
+        backup_time: Option<DateTime<Utc>>,
         error: Option<String>,
     },
     EulaStatusFetched(Vec<serde_json::Value>),
@@ -217,8 +231,6 @@ fn color_to_grayscale(pixels: &mut [egui::Color32]) {
     }
 }
 
-
-use sha2::{Sha256, Digest};
 
 fn get_latest_local_save_time(path: &std::path::Path) -> Option<DateTime<Utc>> {
     let mut latest: Option<DateTime<Utc>> = None;
@@ -322,6 +334,7 @@ fn extract_deployment_id(manifest_info: &serde_json::Value) -> Option<String> {
 }
 
 fn get_cache_path(url: &str) -> Option<std::path::PathBuf> {
+    use sha2::{Sha256, Digest};
     let mut p = crate::auth::get_config_dir()?;
     p.push("cache");
     let _ = std::fs::create_dir_all(&p);
@@ -769,7 +782,7 @@ impl LegendaryApp {
                             }
                         }
                     }
-                    WorkerMsg::SyncCloudSaves { app_name, namespace, save_path } => {
+                    WorkerMsg::SyncCloudSaves { app_name, namespace, save_path, backup_path } => {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Checking cloud saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                         println!("[CloudSaves] Checking saves for {}, namespace: {}", app_name, namespace);
                         if let Some(ref p) = save_path {
@@ -779,6 +792,7 @@ impl LegendaryApp {
                         }
 
                         let local_time = save_path.as_ref().and_then(|p| get_latest_local_save_time(p));
+                        let backup_time = backup_path.as_ref().and_then(|p| get_latest_local_save_time(p));
 
                         let result = if let Some(token) = crate::auth::load_token().ok() {
                             client.get_cloud_save_metadata(&namespace, &token.account_id, &app_name)
@@ -803,6 +817,7 @@ impl LegendaryApp {
                                     files,
                                     local_time,
                                     remote_time,
+                                    backup_time,
                                     error: None,
                                 });
                                 let _ = tx.send(WorkerResponse::TaskFinished(format!("Checked cloud saves for {}", app_name)));
@@ -813,6 +828,7 @@ impl LegendaryApp {
                                     files: Vec::new(),
                                     local_time,
                                     remote_time: None,
+                                    backup_time,
                                     error: Some(e.to_string()),
                                 });
                                 let _ = tx.send(WorkerResponse::Error(format!("Failed to check cloud saves for {}: {}", app_name, e)));
@@ -820,29 +836,205 @@ impl LegendaryApp {
                         }
                         ctx_clone.request_repaint();
                     }
-                    WorkerMsg::UploadCloudSave { app_name, namespace, save_path } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
+                    WorkerMsg::CreateLocalBackup { app_name, source, destination } => {
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Creating backup for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
+
+                        // Use a more robust recursive copy
+                        fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+                            std::fs::create_dir_all(&dst)?;
+                            for entry in std::fs::read_dir(src)? {
+                                let entry = entry?;
+                                let ty = entry.file_type()?;
+                                if ty.is_dir() {
+                                    copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+                                } else {
+                                    std::fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
+                                }
+                            }
+                            Ok(())
+                        }
+
+                        match copy_dir_all(&source, &destination) {
+                            Ok(_) => {
+                                let _ = tx.send(WorkerResponse::TaskFinished(format!("Backup for {} complete", app_name)));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(WorkerResponse::Error(format!("Backup failed: {}", e)));
+                            }
+                        }
+                        ctx_clone.request_repaint();
+                    }
+                    WorkerMsg::UploadCloudSave { app_name, namespace: _, save_path } => {
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Packaging and uploading saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                         if let Ok(token) = crate::auth::load_token() {
-                            let files = get_all_files(&save_path);
-                            let total = files.len();
-                            let mut success = true;
-                            for (i, file_path) in files.iter().enumerate() {
-                                if let Ok(data) = std::fs::read(file_path) {
-                                    let rel_path = file_path.strip_prefix(&save_path).unwrap_or(file_path);
-                                    let filename = rel_path.to_string_lossy().to_string();
-                                    match client.upload_cloud_file(&namespace, &token.account_id, &app_name, &filename, data) {
-                                        Ok(_) => {},
-                                        Err(e) => {
-                                            let _ = tx.send(WorkerResponse::Error(format!("Failed to upload {}: {}", filename, e)));
-                                            success = false;
-                                            break;
-                                        }
+                            let mut files_to_package = get_all_files(&save_path);
+                            if files_to_package.is_empty() {
+                                let _ = tx.send(WorkerResponse::TaskFinished(format!("No save files found for {} to upload.", app_name)));
+                                return;
+                            }
+                            files_to_package.sort_by(|a, b| a.to_string_lossy().to_lowercase().cmp(&b.to_string_lossy().to_lowercase()));
+
+                            let mut manifest = crate::manifest::Manifest {
+                                manifest_version: 18,
+                                meta: crate::manifest::ManifestMeta {
+                                    app_name: format!("{}{}", app_name, token.account_id),
+                                    build_version: Utc::now().format("%Y.%m.%d-%H.%M.%S").to_string(),
+                                    ..Default::default()
+                                },
+                                chunks: HashMap::new(),
+                                files: HashMap::new(),
+                                custom_fields: HashMap::new(),
+                                total_uncompressed_size: 0,
+                                total_download_size: 0,
+                            };
+
+                            // Get CloudSaveFolder from metadata
+                            let local_meta = crate::auth::load_local_metadata(&app_name);
+                            if let Some(meta) = local_meta {
+                                if let Some(attrs) = meta.metadata.custom_attributes {
+                                    if let Some(attr) = attrs.get("CloudSaveFolder") {
+                                        manifest.custom_fields.insert("CloudSaveFolder".to_string(), attr.value.clone());
                                     }
                                 }
-                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false, speed: None, eta: None });
                             }
-                            if success {
-                                let _ = tx.send(WorkerResponse::TaskFinished(format!("Upload for {} complete. {} files uploaded.", app_name, total)));
+
+                            let mut chunks_data = HashMap::new();
+                            let mut current_chunk_data = Vec::with_capacity(1024 * 1024);
+                            let mut current_chunk_guid = [rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>()];
+
+                            for file_path in &files_to_package {
+                                if let Ok(data) = std::fs::read(file_path) {
+                                    let rel_path = file_path.strip_prefix(&save_path).unwrap_or(file_path).to_string_lossy().replace('\\', "/");
+                                    let mut file_manifest = crate::manifest::FileManifest {
+                                        filename: rel_path.clone(),
+                                        hash: [0u8; 20],
+                                        chunk_parts: Vec::new(),
+                                        file_size: data.len() as u64,
+                                        install_tags: Vec::new(),
+                                    };
+
+                                    let mut hasher = Sha1::new();
+                                    hasher.update(&data);
+                                    file_manifest.hash = hasher.finalize().into();
+
+                                    let mut file_offset = 0;
+                                    while file_offset < data.len() {
+                                        let remaining_in_chunk = 1024 * 1024 - current_chunk_data.len();
+                                        let to_copy = std::cmp::min(remaining_in_chunk, data.len() - file_offset);
+
+                                        file_manifest.chunk_parts.push(crate::manifest::ChunkPart {
+                                            guid: current_chunk_guid,
+                                            offset: current_chunk_data.len() as u32,
+                                            size: to_copy as u32,
+                                            file_offset: file_offset as u64,
+                                        });
+
+                                        current_chunk_data.extend_from_slice(&data[file_offset..file_offset + to_copy]);
+                                        file_offset += to_copy;
+
+                                        if current_chunk_data.len() >= 1024 * 1024 {
+                                            let mut chunk_sha1 = Sha1::new();
+                                            chunk_sha1.update(&current_chunk_data);
+                                            let sha_hash: [u8; 20] = chunk_sha1.finalize().into();
+                                            let rolling = crate::manifest::get_rolling_hash(&current_chunk_data);
+
+                                            let chunk_info = crate::manifest::ChunkInfo {
+                                                guid: current_chunk_guid,
+                                                hash: rolling,
+                                                sha_hash,
+                                                group_num: (rolling % 100) as u8,
+                                                window_size: 1024 * 1024,
+                                                file_size: 0, // Will be set after compression
+                                            };
+
+                                            let serialized = crate::manifest::serialize_chunk(&current_chunk_data, current_chunk_guid, rolling, sha_hash).unwrap();
+                                            let mut chunk_info_final = chunk_info.clone();
+                                            chunk_info_final.file_size = serialized.len() as i64;
+
+                                            manifest.chunks.insert(current_chunk_guid, chunk_info_final);
+                                            chunks_data.insert(chunk_info.path(manifest.manifest_version), serialized);
+
+                                            current_chunk_data.clear();
+                                            current_chunk_guid = [rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>()];
+                                        }
+                                    }
+                                    manifest.files.insert(rel_path, file_manifest);
+                                }
+                            }
+
+                            if !current_chunk_data.is_empty() {
+                                let unpadded_len = current_chunk_data.len();
+                                let mut padded_data = current_chunk_data.clone();
+                                padded_data.resize(1024 * 1024, 0);
+
+                                let mut chunk_sha1 = Sha1::new();
+                                chunk_sha1.update(&padded_data);
+                                let sha_hash: [u8; 20] = chunk_sha1.finalize().into();
+                                let rolling = crate::manifest::get_rolling_hash(&padded_data);
+
+                                let chunk_info = crate::manifest::ChunkInfo {
+                                    guid: current_chunk_guid,
+                                    hash: rolling,
+                                    sha_hash,
+                                    group_num: (rolling % 100) as u8,
+                                    window_size: unpadded_len as u32,
+                                    file_size: 0,
+                                };
+
+                                let serialized = crate::manifest::serialize_chunk(&current_chunk_data, current_chunk_guid, rolling, sha_hash).unwrap();
+                                let mut chunk_info_final = chunk_info.clone();
+                                chunk_info_final.file_size = serialized.len() as i64;
+
+                                manifest.chunks.insert(current_chunk_guid, chunk_info_final);
+                                chunks_data.insert(chunk_info.path(manifest.manifest_version), serialized);
+                            }
+
+                            let manifest_serialized = manifest.serialize().unwrap();
+                            let manifest_path = format!("manifests/{}.manifest", manifest.meta.build_version);
+
+                            let mut all_uploads = chunks_data;
+                            all_uploads.insert(manifest_path.clone(), manifest_serialized);
+
+                            let filenames: Vec<String> = all_uploads.keys().cloned().collect();
+
+                            println!("Generated cloud save manifest and {} chunks for {}", all_uploads.len() - 1, app_name);
+
+                            match client.get_cloud_save_links(&token.account_id, &app_name, &filenames) {
+                                Ok(links) => {
+                                    let total = links.len();
+                                    let mut success = true;
+                                    for (i, (remote_path, link_info)) in links.iter().enumerate() {
+                                        if let Some(write_link) = &link_info.write_link {
+                                            let data = all_uploads.get(remote_path).unwrap();
+                                            match client.client.put(write_link).body(data.clone()).send() {
+                                                Ok(resp) if resp.status().is_success() => {},
+                                                Ok(resp) => {
+                                                    let err = format!("Failed to upload chunk {}: {}", remote_path, resp.status());
+                                                    eprintln!("{}", err);
+                                                    let _ = tx.send(WorkerResponse::Error(err));
+                                                    success = false;
+                                                    break;
+                                                },
+                                                Err(e) => {
+                                                    let err = format!("Failed to upload chunk {}: {}", remote_path, e);
+                                                    eprintln!("{}", err);
+                                                    let _ = tx.send(WorkerResponse::Error(err));
+                                                    success = false;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false, speed: None, eta: None });
+                                    }
+                                    if success {
+                                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Upload for {} complete. {} files processed.", app_name, total)));
+                                    }
+                                },
+                                Err(e) => {
+                                    let err = format!("Failed to create cloud save entries: {}", e);
+                                    eprintln!("{}", err);
+                                    let _ = tx.send(WorkerResponse::Error(err));
+                                }
                             }
                         } else {
                             let _ = tx.send(WorkerResponse::Error("Not logged in".to_string()));
@@ -853,36 +1045,167 @@ impl LegendaryApp {
                         let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Downloading saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                         if let Ok(token) = crate::auth::load_token() {
                             match client.get_cloud_save_metadata(&namespace, &token.account_id, &app_name) {
-                                Ok(files) => {
-                                    let total = files.len();
+                                Ok(mut manifest_files) => {
+                                    manifest_files.sort_by(|a, b| a.file_name.cmp(&b.file_name));
                                     let mut success = true;
-                                    for (i, file) in files.iter().enumerate() {
-                                        match client.download_cloud_file(&namespace, &token.account_id, &app_name, &file.file_name) {
-                                            Ok(data) => {
-                                                let target_path = save_path.join(&file.file_name);
-                                                if let Some(parent) = target_path.parent() {
-                                                    let _ = std::fs::create_dir_all(parent);
+                                    let mut manifests_downloaded = 0;
+                                    for file in manifest_files {
+                                        let manifest_data = match client.download_cloud_file(&namespace, &token.account_id, &app_name, &file.file_name) {
+                                            Ok(d) => d,
+                                            Err(e) => {
+                                                let err = format!("Failed to download manifest {}: {}", file.file_name, e);
+                                                eprintln!("{}", err);
+                                                let _ = tx.send(WorkerResponse::Error(err));
+                                                success = false;
+                                                break;
+                                            }
+                                        };
+
+                                        let manifest = match crate::manifest::parse_manifest(&manifest_data) {
+                                            Ok(m) => m,
+                                            Err(e) => {
+                                                let err = format!("Failed to parse manifest {}: {}", file.file_name, e);
+                                                eprintln!("{}", err);
+                                                let _ = tx.send(WorkerResponse::Error(err));
+                                                success = false;
+                                                break;
+                                            }
+                                        };
+
+                                        let chunk_paths: Vec<String> = manifest.chunks.values().map(|c| c.path(manifest.manifest_version)).collect();
+                                        let chunk_links = match client.get_cloud_save_links(&token.account_id, &app_name, &chunk_paths) {
+                                            Ok(links) => links,
+                                            Err(e) => {
+                                                let err = format!("Failed to get chunk links: {}", e);
+                                                eprintln!("{}", err);
+                                                let _ = tx.send(WorkerResponse::Error(err));
+                                                success = false;
+                                                break;
+                                            }
+                                        };
+
+                                        let mut downloaded_chunks = std::collections::HashMap::new();
+                                        let total_chunks = manifest.chunks.len();
+                                        for (i, (guid, chunk_info)) in manifest.chunks.iter().enumerate() {
+                                            let path = chunk_info.path(manifest.manifest_version);
+                                            let link_info = match chunk_links.get(&path) {
+                                                Some(l) => l,
+                                                None => {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("Chunk {} not found in cloud", path)));
+                                                    success = false;
+                                                    break;
                                                 }
-                                                if let Err(e) = std::fs::write(&target_path, data) {
-                                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to write {}: {}", file.file_name, e)));
+                                            };
+                                            let read_link = match &link_info.read_link {
+                                                Some(rl) => rl,
+                                                None => {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("No read link for chunk {}", path)));
+                                                    success = false;
+                                                    break;
+                                                }
+                                            };
+
+                                            let chunk_data = match client.download_manifest(read_link, None) {
+                                                Ok(d) => d,
+                                                Err(e) => {
+                                                    let err = format!("Failed to download chunk {}: {}", path, e);
+                                                    eprintln!("{}", err);
+                                                    let _ = tx.send(WorkerResponse::Error(err));
+                                                    success = false;
+                                                    break;
+                                                }
+                                            };
+
+                                            let raw_data = match crate::manifest::parse_chunk(&chunk_data) {
+                                                Ok(d) => d,
+                                                Err(e) => {
+                                                    let err = format!("Failed to parse chunk {}: {}", path, e);
+                                                    eprintln!("{}", err);
+                                                    let _ = tx.send(WorkerResponse::Error(err));
+                                                    success = false;
+                                                    break;
+                                                }
+                                            };
+                                            downloaded_chunks.insert(*guid, raw_data);
+                                            let _ = tx.send(WorkerResponse::TaskProgress {
+                                                task_name: format!("Downloading chunks for {}", app_name),
+                                                progress: (i + 1) as f32 / total_chunks as f32,
+                                                is_paused: false, speed: None, eta: None
+                                            });
+                                        }
+
+                                        if !success { break; }
+
+                                        for (_, file_manifest) in manifest.files {
+                                            let target_file_path = save_path.join(&file_manifest.filename);
+                                            if let Some(parent) = target_file_path.parent() {
+                                                let _ = std::fs::create_dir_all(parent);
+                                            }
+
+                                            let mut file_data = Vec::with_capacity(file_manifest.file_size as usize);
+                                            for part in file_manifest.chunk_parts {
+                                                if let Some(chunk_raw) = downloaded_chunks.get(&part.guid) {
+                                                    let start = part.offset as usize;
+                                                    let end = start + part.size as usize;
+                                                    if end <= chunk_raw.len() {
+                                                        file_data.extend_from_slice(&chunk_raw[start..end]);
+                                                    } else {
+                                                        let _ = tx.send(WorkerResponse::Error(format!("Chunk part out of bounds for file {}", file_manifest.filename)));
+                                                        success = false;
+                                                        break;
+                                                    }
+                                                } else {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("Missing chunk for file {}", file_manifest.filename)));
                                                     success = false;
                                                     break;
                                                 }
                                             }
-                                            Err(e) => {
-                                                let _ = tx.send(WorkerResponse::Error(format!("Failed to download {}: {}", file.file_name, e)));
+                                            if !success { break; }
+
+                                            // Verify file SHA1
+                                            {
+                                                let mut hasher = Sha1::new();
+                                                hasher.update(&file_data);
+                                                let actual_hash = hasher.finalize();
+                                                if actual_hash.as_slice() != &file_manifest.hash {
+                                                    let _ = tx.send(WorkerResponse::Error(format!("File SHA1 mismatch: {}", file_manifest.filename)));
+                                                    success = false;
+                                                    break;
+                                                }
+                                            }
+
+                                            if let Err(e) = std::fs::write(&target_file_path, &file_data) {
+                                                let err = format!("Failed to write file {}: {}", file_manifest.filename, e);
+                                                eprintln!("{}", err);
+                                                let _ = tx.send(WorkerResponse::Error(err));
                                                 success = false;
                                                 break;
                                             }
+
+                                            // Set modification time from manifest timestamp
+                                            if let Some(timestamp_str) = file.manifest_name.strip_suffix(".manifest") {
+                                                if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(timestamp_str, "%Y.%m.%d-%H.%M.%S") {
+                                                    let dt = naive_dt.and_utc();
+                                                    let system_time: std::time::SystemTime = dt.into();
+                                                    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&target_file_path) {
+                                                        let _ = f.set_times(std::fs::FileTimes::new().set_modified(system_time).set_accessed(system_time));
+                                                    }
+                                                }
+                                            }
                                         }
-                                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Downloading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false, speed: None, eta: None });
+                                        if !success { break; }
+                                        manifests_downloaded += 1;
                                     }
                                     if success {
-                                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Download for {} complete. {} files downloaded.", app_name, total)));
+                                        let msg = format!("Cloud save download for {} complete. {} manifests processed. Save path: {}", app_name, manifests_downloaded, save_path.display());
+                                        println!("{}", msg);
+                                        let _ = tx.send(WorkerResponse::TaskFinished(msg));
                                     }
                                 }
                                 Err(e) => {
-                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to get cloud metadata: {}", e)));
+                                    let err = format!("Failed to get cloud metadata: {}", e);
+                                    eprintln!("{}", err);
+                                    let _ = tx.send(WorkerResponse::Error(err));
                                 }
                             }
                         } else {
@@ -1137,7 +1460,10 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::FetchAdvancedInfo { app_name, install_path } => {
-                        let mut info = AdvancedInfo::default();
+                        let mut info = AdvancedInfo {
+                            app_name: app_name.clone(),
+                            ..Default::default()
+                        };
                         let config = AppConfig::load();
                         let game_settings = config.games.get(&app_name);
 
@@ -1173,40 +1499,51 @@ impl LegendaryApp {
 
                         if let Some(hint) = folder_hint {
                             if std::env::consts::OS == "linux" {
-                                if let Some(mut p) = info.prefix_path.clone() {
-                                    p.push("pfx/drive_c/users/steamuser/AppData/Local");
-                                    p.push(&hint);
+                                if let Some(mut p_users) = info.prefix_path.clone() {
+                                    p_users.push("pfx/drive_c/users");
+                                    if let Ok(entries) = std::fs::read_dir(&p_users) {
+                                        for entry in entries.flatten() {
+                                            let user_path = entry.path();
+                                            if !user_path.is_dir() { continue; }
 
-                                    if p.exists() {
-                                        if let Some(ref aid) = account_id {
-                                            let mut p_aid = p.clone();
-                                            p_aid.push(aid);
-                                            if p_aid.exists() { resolved_path = Some(p_aid); }
-                                            else {
-                                                let mut p_saved = p.clone();
-                                                p_saved.push("Saved/SaveGames");
-                                                p_saved.push(aid);
-                                                if p_saved.exists() { resolved_path = Some(p_saved); }
-                                                else { resolved_path = Some(p); }
-                                            }
-                                        } else { resolved_path = Some(p); }
-                                    } else {
-                                        p.pop();
-                                        let hint_no_space = hint.replace(" ", "");
-                                        p.push(&hint_no_space);
-                                        if p.exists() {
-                                            if let Some(ref aid) = account_id {
-                                                let mut p_aid = p.clone();
-                                                p_aid.push(aid);
-                                                if p_aid.exists() { resolved_path = Some(p_aid); }
-                                                else {
-                                                    let mut p_saved = p.clone();
-                                                    p_saved.push("Saved/SaveGames");
-                                                    p_saved.push(aid);
-                                                    if p_saved.exists() { resolved_path = Some(p_saved); }
-                                                    else { resolved_path = Some(p); }
+                                            let base_search_paths = vec![
+                                                user_path.join("AppData/Local"),
+                                                user_path.join("Documents"),
+                                                user_path.join("Saved Games"),
+                                                user_path.join("My Documents"),
+                                            ];
+
+                                            for base_path in base_search_paths {
+                                                let possible_hints = vec![hint.clone(), hint.replace(" ", "")];
+                                                for h in possible_hints {
+                                                    let p_hint = base_path.join(&h);
+                                                    if p_hint.exists() {
+                                                        if let Some(ref aid) = account_id {
+                                                            // Check for folder with account ID
+                                                            let p_aid = p_hint.join(aid);
+                                                            if p_aid.exists() {
+                                                                resolved_path = Some(p_aid);
+                                                                break;
+                                                            }
+
+                                                            // Check for Saved/SaveGames/AccountID (UE style)
+                                                            let p_saved = p_hint.join("Saved/SaveGames").join(aid);
+                                                            if p_saved.exists() {
+                                                                resolved_path = Some(p_saved);
+                                                                break;
+                                                            }
+                                                        }
+
+                                                        // Fallback to hint folder itself if no account-specific folder found
+                                                        if resolved_path.is_none() {
+                                                            resolved_path = Some(p_hint);
+                                                        }
+                                                        break;
+                                                    }
                                                 }
-                                            } else { resolved_path = Some(p); }
+                                                if resolved_path.is_some() { break; }
+                                            }
+                                            if resolved_path.is_some() { break; }
                                         }
                                     }
                                 }
@@ -1232,6 +1569,14 @@ impl LegendaryApp {
                             }
                         }
                         info.save_path = resolved_path;
+
+                        let mut backup_path = game_settings.and_then(|s| s.local_backup_path.clone());
+                        if backup_path.is_none() {
+                            if let Some(config_dir) = crate::auth::get_config_dir() {
+                                backup_path = Some(config_dir.join(&app_name));
+                            }
+                        }
+                        info.backup_path = backup_path;
 
                         // DLSS / DLSSD
                         let game_dir = std::path::Path::new(&install_path);
@@ -1742,6 +2087,25 @@ impl LegendaryApp {
                                 cmd.env("EpicApp", &app_name);
                                 cmd.env("EpicEnv", "Prod");
 
+                                // Proton Prefer SDL
+                                let prefer_sdl = game_settings.map(|s| s.proton_prefer_sdl)
+                                    .unwrap_or(config.global.proton_prefer_sdl);
+                                if prefer_sdl {
+                                    cmd.env("PROTON_PREFER_SDL", "1");
+                                }
+
+                                // Global environment variables
+                                for (k, v) in &config.global.env_vars {
+                                    cmd.env(k, v);
+                                }
+
+                                // Per-game environment variables (override global)
+                                if let Some(gs) = game_settings {
+                                    for (k, v) in &gs.env_vars {
+                                        cmd.env(k, v);
+                                    }
+                                }
+
                                 // Additional environment variables and parameters...
                                 if let Some(val) = game_settings.and_then(|s| s.steam_compat_install_path.as_ref())
                                     .or_else(|| config.global.steam_compat_install_path.as_ref()) {
@@ -1766,7 +2130,7 @@ impl LegendaryApp {
                                 println!("Executable: {:?}", exe_path);
                                 let vars = ["GAMEID", "STORE", "STEAM_COMPAT_INSTALL_PATH", "LD_PRELOAD",
                                            "STEAM_COMPAT_CLIENT_INSTALL_PATH", "WINEPREFIX", "STEAM_COMPAT_DATA_PATH",
-                                           "PROTONPATH", "STEAM_COMPAT_APP_ID", "APP_NAME"];
+                                           "PROTONPATH", "STEAM_COMPAT_APP_ID", "APP_NAME", "PROTON_PREFER_SDL"];
                                 for var in vars {
                                     let val = cmd.get_envs().find(|(k, _): &(&std::ffi::OsStr, Option<&std::ffi::OsStr>)| k.to_str() == Some(var))
                                         .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
@@ -1933,6 +2297,8 @@ impl LegendaryApp {
             eos_status: crate::eos::EosOverlayStatus::default(),
             eos_prefix_path: None,
             advanced_info: None,
+            new_env_key: String::new(),
+            new_env_val: String::new(),
         }
     }
 }
@@ -1993,12 +2359,13 @@ impl eframe::App for LegendaryApp {
                 WorkerResponse::OriginUriFetched(uri) => {
                     let _ = open::that(uri);
                 }
-                WorkerResponse::SaveSyncStatusFetched { app_name, files, local_time, remote_time, error } => {
+                WorkerResponse::SaveSyncStatusFetched { app_name, files, local_time, remote_time, backup_time, error } => {
                     self.save_sync_status = Some(SaveSyncStatus {
                         app_name,
                         files,
                         local_time,
                         remote_time,
+                        backup_time,
                         loading: false,
                         error,
                     });
@@ -2433,12 +2800,14 @@ impl LegendaryApp {
                                 if let Some(item) = self.library.iter().find(|i| i.app_name == app_name) {
                                     let save_path = self.advanced_info.as_ref().and_then(|i| i.save_path.clone())
                                         .or_else(|| self.config.games.get(&app_name).and_then(|s| s.save_path.clone()));
+                                    let backup_path = self.advanced_info.as_ref().and_then(|i| i.backup_path.clone());
 
                                     self.save_sync_status = Some(SaveSyncStatus {
                                         app_name: app_name.clone(),
                                         files: Vec::new(),
                                         local_time: None,
                                         remote_time: None,
+                                        backup_time: None,
                                         loading: true,
                                         error: None,
                                     });
@@ -2448,6 +2817,7 @@ impl LegendaryApp {
                                         app_name: app_name.clone(),
                                         namespace: item.namespace.clone(),
                                         save_path,
+                                        backup_path,
                                     });
                                 }
                             }
@@ -2610,7 +2980,7 @@ impl LegendaryApp {
                 }
 
                 ui.add_space(10.0);
-                ui.collapsing("Advanced", |ui| {
+                ui.collapsing("Advanced Options", |ui| {
                     let mut changed = false;
                     let game_settings = self.config.games.entry(app_name.clone()).or_default();
 
@@ -2625,10 +2995,16 @@ impl LegendaryApp {
                         }
                         if let Some(p) = &info.save_path {
                             ui.horizontal(|ui| {
-                                ui.label(format!("Discovered save folder path: {}", p.to_string_lossy()));
+                                ui.label("📂");
+                                ui.label(egui::RichText::new(format!("Local Save Path: {}", p.to_string_lossy())).strong());
                                 if ui.button("Open Folder").clicked() {
                                     let _ = open::that(p);
                                 }
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label("📂");
+                                ui.label(egui::RichText::new("Local Save Path: Not discovered").italics());
                             });
                         }
                         if let Some(p) = &info.dlss_path {
@@ -2659,6 +3035,63 @@ impl LegendaryApp {
                     }
 
                     ui.add_space(5.0);
+                    ui.group(|ui| {
+                        ui.label("Advanced path to save file:");
+                        ui.horizontal(|ui| {
+                            let mut save_str = game_settings.save_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.add(egui::TextEdit::singleline(&mut save_str).hint_text("Advanced path to save file (optional)")).changed() {
+                                game_settings.save_path = if save_str.is_empty() { None } else { Some(std::path::PathBuf::from(save_str)) };
+                                changed = true;
+                            }
+                            if ui.button("Browse...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                    game_settings.save_path = Some(path);
+                                    changed = true;
+                                }
+                            }
+                        });
+                        ui.separator();
+                        ui.label("Local Backup Settings:");
+                        if ui.checkbox(&mut game_settings.local_backup_enabled, "Enable Local Backup").changed() {
+                            changed = true;
+                        }
+                        if let Some(info) = &self.advanced_info {
+                            if let Some(p) = &info.backup_path {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("Path: {}", p.to_string_lossy()));
+                                    if ui.button("Open").clicked() {
+                                        let _ = open::that(p);
+                                    }
+                                });
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            let mut backup_str = game_settings.local_backup_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.add(egui::TextEdit::singleline(&mut backup_str).hint_text("Custom Backup Path (optional)")).changed() {
+                                game_settings.local_backup_path = if backup_str.is_empty() { None } else { Some(std::path::PathBuf::from(backup_str)) };
+                                changed = true;
+                            }
+                            if ui.button("Browse...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                    game_settings.local_backup_path = Some(path);
+                                    changed = true;
+                                }
+                            }
+                        });
+                        if let Some(info) = &self.advanced_info {
+                            if let (Some(src), Some(dst)) = (&info.save_path, &info.backup_path) {
+                                if ui.button("Backup Now (Local -> Backup)").clicked() {
+                                    let _ = self.tx.send(WorkerMsg::CreateLocalBackup {
+                                        app_name: app_name.clone(),
+                                        source: src.clone(),
+                                        destination: dst.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    });
+
+                    ui.add_space(5.0);
                     ui.label("Custom Executable Path (optional):");
                     ui.horizontal(|ui| {
                         let mut exe_str = game_settings.custom_exe_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
@@ -2678,6 +3111,83 @@ impl LegendaryApp {
                     if ui.checkbox(&mut game_settings.eos_overlay_enabled, "Enable EOS Overlay").changed() {
                         changed = true;
                     }
+
+                    if ui.checkbox(&mut game_settings.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
+                        changed = true;
+                    }
+
+                    ui.add_space(10.0);
+                    ui.collapsing("Environment Variables", |ui| {
+                        ui.separator();
+                        ui.label("Steam Compatibility Overrides:");
+                        ui.horizontal(|ui| {
+                            ui.label("STEAM_COMPAT_INSTALL_PATH:");
+                            let mut path_str = game_settings.steam_compat_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.text_edit_singleline(&mut path_str).changed() {
+                                game_settings.steam_compat_install_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                                changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("STEAM_COMPAT_CLIENT_INSTALL_PATH:");
+                            let mut path_str = game_settings.steam_compat_client_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.text_edit_singleline(&mut path_str).changed() {
+                                game_settings.steam_compat_client_install_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                                changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("STEAM_COMPAT_DATA_PATH:");
+                            let mut path_str = game_settings.steam_compat_data_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                            if ui.text_edit_singleline(&mut path_str).changed() {
+                                game_settings.steam_compat_data_path = if path_str.is_empty() { None } else { Some(std::path::PathBuf::from(path_str)) };
+                                changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("STEAM_COMPAT_APP_ID:");
+                            let mut id_str = game_settings.steam_compat_app_id.clone().unwrap_or_default();
+                            if ui.text_edit_singleline(&mut id_str).changed() {
+                                game_settings.steam_compat_app_id = if id_str.is_empty() { None } else { Some(id_str) };
+                                changed = true;
+                            }
+                        });
+
+                        ui.separator();
+                        ui.label("Custom Environment Variables:");
+                        let mut to_remove = None;
+                        for (k, v) in &mut game_settings.env_vars {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("{}: ", k));
+                                if ui.text_edit_singleline(v).changed() {
+                                    changed = true;
+                                }
+                                if ui.button("🗑").on_hover_text("Remove").clicked() {
+                                    to_remove = Some(k.clone());
+                                }
+                            });
+                        }
+                        if let Some(k) = to_remove {
+                            game_settings.env_vars.remove(&k);
+                            changed = true;
+                        }
+
+                        let new_key = &mut self.new_env_key;
+                        let new_val = &mut self.new_env_val;
+                        let game_env_vars = &mut game_settings.env_vars;
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(new_key).hint_text("Key"));
+                            ui.add(egui::TextEdit::singleline(new_val).hint_text("Value"));
+                            if ui.button("Add").clicked() {
+                                if !new_key.is_empty() {
+                                    game_env_vars.insert(new_key.clone(), new_val.clone());
+                                    new_key.clear();
+                                    new_val.clear();
+                                    changed = true;
+                                }
+                            }
+                        });
+                    });
 
                     ui.add_space(10.0);
                     ui.collapsing("Manifest Files", |ui| {
@@ -2930,11 +3440,13 @@ impl LegendaryApp {
                     if ui.button("Retry").clicked() {
                         if let Some(item) = self.library.iter().find(|i| i.app_name == status.app_name) {
                             let save_path = self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone());
+                            let backup_path = self.advanced_info.as_ref().and_then(|i| i.backup_path.clone());
                             self.save_sync_status = Some(SaveSyncStatus {
                                 app_name: status.app_name.clone(),
                                 files: Vec::new(),
                                 local_time: None,
                                 remote_time: None,
+                                backup_time: None,
                                 loading: true,
                                 error: None,
                             });
@@ -2942,6 +3454,7 @@ impl LegendaryApp {
                                 app_name: status.app_name.clone(),
                                 namespace: item.namespace.clone(),
                                 save_path,
+                                backup_path,
                             });
                         }
                     }
@@ -2949,11 +3462,12 @@ impl LegendaryApp {
                 return;
             }
 
-            let can_upload = self.config.games.get(&status.app_name).and_then(|s| s.save_path.as_ref()).is_some();
+            let can_upload = self.config.games.get(&status.app_name).and_then(|s| s.save_path.as_ref()).is_some()
+                || (self.advanced_info.as_ref().map(|i| i.app_name == status.app_name && i.save_path.is_some()).unwrap_or(false));
             let can_download = !status.files.is_empty();
 
             ui.horizontal_top(|ui| {
-                let box_width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                let box_width = (ui.available_width() - ui.spacing().item_spacing.x * 2.0) / 3.0;
                 let box_height = 250.0;
 
                 // Local Box
@@ -2974,12 +3488,52 @@ impl LegendaryApp {
                             } else {
                                 ui.label("No local save found");
                             }
-                            ui.add_space(20.0);
+
+                            let current_save_path = self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone());
+                            if let Some(p) = current_save_path {
+                                ui.label(egui::RichText::new(format!("Path: {}", p.to_string_lossy())).small());
+                            } else if let Some(info) = &self.advanced_info {
+                                if info.app_name == status.app_name {
+                                    if let Some(p) = &info.save_path {
+                                        ui.label(egui::RichText::new(format!("Discovered: {}", p.to_string_lossy())).small().italics());
+                                    }
+                                }
+                            }
+
+                            if ui.button("Change Path...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                    let game_settings = self.config.games.entry(status.app_name.clone()).or_default();
+                                    game_settings.save_path = Some(path.clone());
+                                    let _ = self.config.save();
+
+                                    // Refresh status
+                                    if let Some(item) = self.library.iter().find(|i| i.app_name == status.app_name) {
+                                        let backup_path = self.advanced_info.as_ref().and_then(|i| i.backup_path.clone());
+                                        self.save_sync_status = Some(SaveSyncStatus {
+                                            app_name: status.app_name.clone(),
+                                            files: Vec::new(),
+                                            local_time: None,
+                                            remote_time: None,
+                                            backup_time: None,
+                                            loading: true,
+                                            error: None,
+                                        });
+                                        let _ = self.tx.send(WorkerMsg::SyncCloudSaves {
+                                            app_name: status.app_name.clone(),
+                                            namespace: item.namespace.clone(),
+                                            save_path: Some(path),
+                                            backup_path,
+                                        });
+                                    }
+                                }
+                            }
+
+                            ui.add_space(10.0);
                             ui.label(egui::RichText::new("🖴").size(80.0));
-                            ui.add_space(20.0);
+                            ui.add_space(10.0);
 
                             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                                if ui.add_enabled(can_upload, egui::Button::new(egui::RichText::new("Upload").strong()).min_size(egui::vec2(box_width - 20.0, 30.0))).clicked() {
+                                if ui.add_enabled(can_upload, egui::Button::new(egui::RichText::new("Upload Local -> Cloud").strong())).clicked() {
                                     let save_path = self.advanced_info.as_ref().and_then(|i| i.save_path.clone())
                                         .or_else(|| self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone()));
 
@@ -2988,6 +3542,44 @@ impl LegendaryApp {
                                             app_name: status.app_name.clone(),
                                             namespace: item.namespace.clone(),
                                             save_path: sp,
+                                        });
+                                    }
+                                }
+                            });
+                        });
+                    });
+                });
+
+                // Local Backup Box
+                let backup_frame = egui::Frame::group(ui.style())
+                    .rounding(5.0)
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
+
+                backup_frame.show(ui, |ui| {
+                    ui.set_min_size(egui::vec2(box_width, box_height));
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::from_rgb(100, 200, 100), egui::RichText::new(" Local Backup ").strong().background_color(egui::Color32::from_rgb(40, 80, 40)));
+                        });
+                        ui.add_space(10.0);
+                        ui.vertical_centered(|ui| {
+                            if let Some(t) = status.backup_time {
+                                ui.label(t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string());
+                            } else {
+                                ui.label("No backup found");
+                            }
+                            ui.add_space(20.0);
+                            ui.label(egui::RichText::new("📦").size(80.0));
+                            ui.add_space(20.0);
+
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                                let backup_path = self.advanced_info.as_ref().and_then(|i| i.backup_path.clone());
+                                if ui.add_enabled(status.backup_time.is_some() && can_upload, egui::Button::new(egui::RichText::new("Upload Backup -> Cloud").strong())).clicked() {
+                                    if let (Some(item), Some(bp)) = (self.library.iter().find(|i| i.app_name == status.app_name), backup_path) {
+                                        let _ = self.tx.send(WorkerMsg::UploadCloudSave {
+                                            app_name: status.app_name.clone(),
+                                            namespace: item.namespace.clone(),
+                                            save_path: bp,
                                         });
                                     }
                                 }
@@ -3019,18 +3611,30 @@ impl LegendaryApp {
                             ui.add_space(20.0);
 
                             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                                if ui.add_enabled(can_download, egui::Button::new(egui::RichText::new("Download").strong()).min_size(egui::vec2(box_width - 20.0, 30.0))).clicked() {
-                                    let save_path = self.advanced_info.as_ref().and_then(|i| i.save_path.clone())
-                                        .or_else(|| self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone()));
+                                ui.vertical(|ui| {
+                                    if ui.add_enabled(can_download, egui::Button::new(egui::RichText::new("Download Cloud -> Local").strong())).clicked() {
+                                        let save_path = self.advanced_info.as_ref().and_then(|i| i.save_path.clone())
+                                            .or_else(|| self.config.games.get(&status.app_name).and_then(|s| s.save_path.clone()));
 
-                                    if let (Some(item), Some(sp)) = (self.library.iter().find(|i| i.app_name == status.app_name), save_path) {
-                                        let _ = self.tx.send(WorkerMsg::DownloadCloudSave {
-                                            app_name: status.app_name.clone(),
-                                            namespace: item.namespace.clone(),
-                                            save_path: sp,
-                                        });
+                                        if let (Some(item), Some(sp)) = (self.library.iter().find(|i| i.app_name == status.app_name), save_path) {
+                                            let _ = self.tx.send(WorkerMsg::DownloadCloudSave {
+                                                app_name: status.app_name.clone(),
+                                                namespace: item.namespace.clone(),
+                                                save_path: sp,
+                                            });
+                                        }
                                     }
-                                }
+                                    if ui.add_enabled(can_download, egui::Button::new(egui::RichText::new("Download Cloud -> Backup").strong())).clicked() {
+                                        let backup_path = self.advanced_info.as_ref().and_then(|i| i.backup_path.clone());
+                                        if let (Some(item), Some(bp)) = (self.library.iter().find(|i| i.app_name == status.app_name), backup_path) {
+                                            let _ = self.tx.send(WorkerMsg::DownloadCloudSave {
+                                                app_name: status.app_name.clone(),
+                                                namespace: item.namespace.clone(),
+                                                save_path: bp,
+                                            });
+                                        }
+                                    }
+                                });
                             });
                         });
                     });
@@ -3352,7 +3956,13 @@ impl LegendaryApp {
             }
 
             ui.add_space(10.0);
-            ui.collapsing("Default Steam Compatibility Settings", |ui| {
+                ui.collapsing("Advanced Options", |ui| {
+                if ui.checkbox(&mut self.config.global.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
+                    changed = true;
+                }
+
+                ui.separator();
+                ui.label("Steam Compatibility Overrides:");
                 ui.horizontal(|ui| {
                     ui.label("STEAM_COMPAT_INSTALL_PATH:");
                     let mut path_str = self.config.global.steam_compat_install_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
@@ -3383,6 +3993,41 @@ impl LegendaryApp {
                     if ui.text_edit_singleline(&mut id_str).changed() {
                         self.config.global.steam_compat_app_id = if id_str.is_empty() { None } else { Some(id_str) };
                         changed = true;
+                    }
+                });
+
+                ui.separator();
+                ui.label("Other Custom Environment Variables:");
+                let mut to_remove = None;
+                for (k, v) in &mut self.config.global.env_vars {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}: ", k));
+                        if ui.text_edit_singleline(v).changed() {
+                            changed = true;
+                        }
+                        if ui.button("🗑").on_hover_text("Remove").clicked() {
+                            to_remove = Some(k.clone());
+                        }
+                    });
+                }
+                if let Some(k) = to_remove {
+                    self.config.global.env_vars.remove(&k);
+                    changed = true;
+                }
+
+                let new_key = &mut self.new_env_key;
+                let new_val = &mut self.new_env_val;
+                let global_env_vars = &mut self.config.global.env_vars;
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(new_key).hint_text("Key"));
+                    ui.add(egui::TextEdit::singleline(new_val).hint_text("Value"));
+                    if ui.button("Add").clicked() {
+                        if !new_key.is_empty() {
+                            global_env_vars.insert(new_key.clone(), new_val.clone());
+                            new_key.clear();
+                            new_val.clear();
+                            changed = true;
+                        }
                     }
                 });
             });

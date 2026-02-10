@@ -161,12 +161,27 @@ pub struct ReleaseInfo {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CloudSaveFile {
-    #[serde(rename = "fileName")]
+    #[serde(default)]
+    pub app_name: String,
+    #[serde(rename = "fileName", default)]
     pub file_name: String,
+    #[serde(default)]
+    pub manifest_name: String,
+    #[serde(default)]
     pub hash: String,
+    #[serde(default)]
     pub length: u64,
     #[serde(rename = "lastModified")]
     pub last_modified: String,
+    #[serde(rename = "readLink")]
+    pub read_link: Option<String>,
+    #[serde(rename = "writeLink")]
+    pub write_link: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CloudSaveResponse {
+    pub files: std::collections::HashMap<String, CloudSaveFile>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
