@@ -1,4 +1,48 @@
 use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+pub struct AdvancedInfo {
+    pub app_name: String,
+    pub save_path: Option<std::path::PathBuf>,
+    pub backup_path: Option<std::path::PathBuf>,
+    pub prefix_path: Option<std::path::PathBuf>,
+    pub dlss_path: Option<std::path::PathBuf>,
+    pub dlssd_path: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskStatus {
+    pub name: String,
+    pub progress: f32,
+    pub is_paused: bool,
+    pub speed: String,
+    pub eta: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SaveSyncStatus {
+    pub app_name: String,
+    pub files: Vec<CloudSaveFile>,
+    pub local_time: Option<DateTime<Utc>>,
+    pub remote_time: Option<DateTime<Utc>>,
+    pub backup_time: Option<DateTime<Utc>>,
+    pub loading: bool,
+    pub error: Option<String>,
+}
+
+#[derive(PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum View {
+    Auth,
+    Library,
+    GameDetail,
+    Settings,
+    SaveSync,
+    InstallDialog,
+    Tasks,
+    Account,
+    EosOverlay,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LibraryItem {

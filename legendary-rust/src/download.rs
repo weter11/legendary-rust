@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 use std::sync::mpsc::{Sender, channel};
-use crate::app::WorkerResponse;
+use crate::worker::WorkerResponse;
 use std::time::{Instant, Duration};
 
 pub struct Downloader {
