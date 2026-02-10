@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@v6
 
     - name: Install dependencies
       run: |
@@ -31,7 +31,7 @@ jobs:
       run: cd legendary-rust && cargo deb
 
     - name: Upload Debian package
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: legendary-rust-deb
         path: legendary-rust/target/debian/*.deb
