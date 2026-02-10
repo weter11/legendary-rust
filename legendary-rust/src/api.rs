@@ -26,7 +26,7 @@ pub fn get_ua_for_app(app_name: &str) -> &'static str {
 }
 
 pub struct EgsClient {
-    client: reqwest::blocking::Client,
+    pub client: reqwest::blocking::Client,
     user_basic: String,
     pw_basic: String,
     token_info: Option<OAuthToken>,

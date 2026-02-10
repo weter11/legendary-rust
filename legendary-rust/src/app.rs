@@ -232,8 +232,6 @@ fn color_to_grayscale(pixels: &mut [egui::Color32]) {
 }
 
 
-use sha2::{Sha256, Digest};
-
 fn get_latest_local_save_time(path: &std::path::Path) -> Option<DateTime<Utc>> {
     let mut latest: Option<DateTime<Utc>> = None;
     if let Ok(entries) = std::fs::read_dir(path) {
@@ -336,6 +334,7 @@ fn extract_deployment_id(manifest_info: &serde_json::Value) -> Option<String> {
 }
 
 fn get_cache_path(url: &str) -> Option<std::path::PathBuf> {
+    use sha2::{Sha256, Digest};
     let mut p = crate::auth::get_config_dir()?;
     p.push("cache");
     let _ = std::fs::create_dir_all(&p);
@@ -3114,12 +3113,12 @@ impl LegendaryApp {
                         changed = true;
                     }
 
+                    if ui.checkbox(&mut game_settings.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
+                        changed = true;
+                    }
+
                     ui.add_space(10.0);
                     ui.collapsing("Environment Variables", |ui| {
-                        if ui.checkbox(&mut game_settings.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
-                            changed = true;
-                        }
-
                         ui.separator();
                         ui.label("Steam Compatibility Overrides:");
                         ui.horizontal(|ui| {
