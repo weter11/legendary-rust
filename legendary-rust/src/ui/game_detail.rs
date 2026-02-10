@@ -1,7 +1,7 @@
 use crate::app::LegendaryApp;
+use crate::config::CompatibilityTool;
 use crate::models::{SaveSyncStatus, View};
 use crate::worker::WorkerMsg;
-use crate::config::{CompatibilityTool};
 use eframe::egui;
 
 pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
@@ -230,34 +230,35 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                 });
             }
 
-            if let Some(meta) = &local_meta {
-                if let Some(dlcs) = &meta.metadata.dlc_item_list {
-                    if !dlcs.is_empty() {
-                        ui.add_space(10.0);
-                        ui.collapsing("DLCs", |ui| {
-                            for dlc in dlcs {
-                                ui.horizontal(|ui| {
-                                    ui.label(&dlc.title);
-                                    let dlc_installed = app.installed_games.iter().any(|g| g.app_name == dlc.id);
-                                    if dlc_installed {
-                                        ui.label("✅ Installed");
-                                        if ui.button("Uninstall").clicked() {
-                                            let _ = app.tx.send(WorkerMsg::UninstallGame(dlc.id.clone()));
-                                        }
-                                    } else {
-                                        if ui.button("Install").clicked() {
-                                            // We need to fetch install info for DLC first
-                                            let _ = app.tx.send(WorkerMsg::FetchInstallInfo {
-                                                app_name: dlc.id.clone(),
-                                                title: dlc.title.clone(),
-                                            });
-                                        }
-                                    }
+            let dlcs = if !game.dlc_item_list.is_empty() {
+                game.dlc_item_list.clone()
+            } else {
+                local_meta
+                    .as_ref()
+                    .and_then(|meta| meta.metadata.dlc_item_list.clone())
+                    .unwrap_or_default()
+            };
+            if !dlcs.is_empty() {
+                ui.add_space(10.0);
+                ui.collapsing("DLCs", |ui| {
+                    for dlc in dlcs {
+                        ui.horizontal(|ui| {
+                            ui.label(&dlc.title);
+                            let dlc_installed = app.installed_games.iter().any(|g| g.app_name == dlc.id);
+                            if dlc_installed {
+                                ui.label("✅ Installed");
+                                if ui.button("Uninstall").clicked() {
+                                    let _ = app.tx.send(WorkerMsg::UninstallGame(dlc.id.clone()));
+                                }
+                            } else if ui.button("Install").clicked() {
+                                let _ = app.tx.send(WorkerMsg::FetchInstallInfo {
+                                    app_name: dlc.id.clone(),
+                                    title: dlc.title.clone(),
                                 });
                             }
                         });
                     }
-                }
+                });
             }
 
             ui.separator();
@@ -423,7 +424,7 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                     changed = true;
                 }
 
-                if ui.checkbox(&mut game_settings.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
+                if ui.checkbox(&mut game_settings.proton_prefer_sdl, "Proton Prefer SDL").changed() {
                     changed = true;
                 }
 

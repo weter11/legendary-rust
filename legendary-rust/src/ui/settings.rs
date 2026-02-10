@@ -1,6 +1,6 @@
 use crate::app::LegendaryApp;
+use crate::config::CompatibilityTool;
 use crate::worker::WorkerMsg;
-use crate::config::{CompatibilityTool};
 use eframe::egui;
 
 pub fn show_settings_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
@@ -182,7 +182,7 @@ pub fn show_settings_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
             if ui
                 .checkbox(
                     &mut app.config.global.proton_prefer_sdl,
-                    "Proton Prefer SDL (PROTON_PREFER_SDL=1)",
+                    "Proton Prefer SDL",
                 )
                 .changed()
             {
@@ -219,8 +219,7 @@ pub fn show_settings_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 if ui.text_edit_singleline(&mut path_str).changed() {
-                    app.config.global.steam_compat_client_install_path = if path_str.is_empty()
-                    {
+                    app.config.global.steam_compat_client_install_path = if path_str.is_empty() {
                         None
                     } else {
                         Some(std::path::PathBuf::from(path_str))

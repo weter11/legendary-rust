@@ -1,7 +1,6 @@
 use crate::api::EgsClient;
-use crate::models::{
-    AdvancedInfo, Asset, GameInfo, InstalledGame, LibraryItem, OAuthToken,
-};
+use crate::config::{AppConfig, CompatibilityTool};
+use crate::models::{AdvancedInfo, Asset, GameInfo, InstalledGame, LibraryItem, OAuthToken};
 use crate::utils::{
     extract_deployment_id, find_file_in_dir, find_manifest_url, get_all_files, get_cache_path,
     get_default_compat_data_path, get_latest_local_save_time, write_cloud_debug_blob,
@@ -14,7 +13,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use crate::config::{AppConfig, CompatibilityTool};
 
 pub(crate) enum WorkerMsg {
     Login(String),
@@ -312,7 +310,9 @@ pub(crate) fn spawn_worker(
                             let pixels = img.to_rgba8();
                             let pixels: Vec<egui::Color32> = pixels
                                 .chunks_exact(4)
-                                .map(|p| egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
+                                .map(|p| {
+                                    egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])
+                                })
                                 .collect();
 
                             let mut color_image = egui::ColorImage { size, pixels };
@@ -699,10 +699,12 @@ pub(crate) fn spawn_worker(
                                 app_name, token, urlencoding::encode(&user_name), account_id);
 
                         // Find metadata for extra args if any
-                        if let Some(item) = cached_library_items.iter().find(|i| i.app_name == app_name) {
+                        if let Some(item) =
+                            cached_library_items.iter().find(|i| i.app_name == app_name)
+                        {
                             if let Some(meta) = &item.metadata {
-                                if let Some(extra) = meta["customAttributes"]["AdditionalCommandline"]
-                                    ["value"]
+                                if let Some(extra) = meta["customAttributes"]
+                                    ["AdditionalCommandline"]["value"]
                                     .as_str()
                                 {
                                     for part in extra.split('&') {
@@ -745,7 +747,9 @@ pub(crate) fn spawn_worker(
                         println!("[CloudSaves] No local save path configured/discovered yet.");
                     }
 
-                    let local_time = save_path.as_ref().and_then(|p| get_latest_local_save_time(p));
+                    let local_time = save_path
+                        .as_ref()
+                        .and_then(|p| get_latest_local_save_time(p));
                     let backup_time = backup_path
                         .as_ref()
                         .and_then(|p| get_latest_local_save_time(p));
@@ -760,10 +764,12 @@ pub(crate) fn spawn_worker(
                         Ok(files) => {
                             let mut remote_time = None;
                             for file in &files {
-                                if let Ok(dt) = DateTime::parse_from_rfc3339(&file.last_modified) {
-                                    let dt_utc = dt.with_timezone(&Utc);
-                                    if remote_time.is_none() || dt_utc > remote_time.unwrap() {
-                                        remote_time = Some(dt_utc);
+                                if let Some(last_modified) = &file.last_modified {
+                                    if let Ok(dt) = DateTime::parse_from_rfc3339(last_modified) {
+                                        let dt_utc = dt.with_timezone(&Utc);
+                                        if remote_time.is_none() || dt_utc > remote_time.unwrap() {
+                                            remote_time = Some(dt_utc);
+                                        }
                                     }
                                 }
                             }
@@ -936,8 +942,9 @@ pub(crate) fn spawn_worker(
                                         file_offset: file_offset as u64,
                                     });
 
-                                    current_chunk_data
-                                        .extend_from_slice(&data[file_offset..file_offset + to_copy]);
+                                    current_chunk_data.extend_from_slice(
+                                        &data[file_offset..file_offset + to_copy],
+                                    );
                                     file_offset += to_copy;
 
                                     if current_chunk_data.len() >= 1024 * 1024 {
@@ -966,7 +973,9 @@ pub(crate) fn spawn_worker(
                                         let mut chunk_info_final = chunk_info.clone();
                                         chunk_info_final.file_size = serialized.len() as i64;
 
-                                        manifest.chunks.insert(current_chunk_guid, chunk_info_final);
+                                        manifest
+                                            .chunks
+                                            .insert(current_chunk_guid, chunk_info_final);
                                         chunks_data.insert(
                                             chunk_info.path(manifest.manifest_version),
                                             serialized,
@@ -1034,7 +1043,8 @@ pub(crate) fn spawn_worker(
                             app_name
                         );
 
-                        match client.get_cloud_save_links(&token.account_id, &app_name, &filenames) {
+                        match client.get_cloud_save_links(&token.account_id, &app_name, &filenames)
+                        {
                             Ok(links) => {
                                 let total = filenames.len();
                                 let mut success = true;
@@ -1073,9 +1083,12 @@ pub(crate) fn spawn_worker(
                                         data.len(),
                                         remote_path
                                     );
-                                    if let Some(tmp) =
-                                        write_cloud_debug_blob("upload", &app_name, remote_path, data)
-                                    {
+                                    if let Some(tmp) = write_cloud_debug_blob(
+                                        "upload",
+                                        &app_name,
+                                        remote_path,
+                                        data,
+                                    ) {
                                         println!(
                                             "[CloudSave][Upload] Temp payload path: {}",
                                             tmp.display()
@@ -1144,7 +1157,11 @@ pub(crate) fn spawn_worker(
                         eta: None,
                     });
                     if let Ok(token) = crate::auth::load_token() {
-                        match client.get_cloud_save_metadata(&namespace, &token.account_id, &app_name) {
+                        match client.get_cloud_save_metadata(
+                            &namespace,
+                            &token.account_id,
+                            &app_name,
+                        ) {
                             Ok(mut manifest_files) => {
                                 manifest_files.sort_by(|a, b| a.file_name.cmp(&b.file_name));
                                 let mut success = true;
@@ -1222,7 +1239,8 @@ pub(crate) fn spawn_worker(
 
                                     let mut downloaded_chunks = std::collections::HashMap::new();
                                     let total_chunks = manifest.chunks.len();
-                                    for (i, (guid, chunk_info)) in manifest.chunks.iter().enumerate()
+                                    for (i, (guid, chunk_info)) in
+                                        manifest.chunks.iter().enumerate()
                                     {
                                         let path = chunk_info.path(manifest.manifest_version);
                                         let link_info = match chunk_links.get(&path) {
@@ -1325,16 +1343,20 @@ pub(crate) fn spawn_worker(
                                         let mut file_data =
                                             Vec::with_capacity(file_manifest.file_size as usize);
                                         for part in file_manifest.chunk_parts {
-                                            if let Some(chunk_raw) = downloaded_chunks.get(&part.guid) {
+                                            if let Some(chunk_raw) =
+                                                downloaded_chunks.get(&part.guid)
+                                            {
                                                 let start = part.offset as usize;
                                                 let end = start + part.size as usize;
                                                 if end <= chunk_raw.len() {
-                                                    file_data.extend_from_slice(&chunk_raw[start..end]);
+                                                    file_data
+                                                        .extend_from_slice(&chunk_raw[start..end]);
                                                 } else {
-                                                    let _ = tx.send(WorkerResponse::Error(format!(
-                                                        "Chunk part out of bounds for file {}",
-                                                        file_manifest.filename
-                                                    )));
+                                                    let _ =
+                                                        tx.send(WorkerResponse::Error(format!(
+                                                            "Chunk part out of bounds for file {}",
+                                                            file_manifest.filename
+                                                        )));
                                                     success = false;
                                                     break;
                                                 }
@@ -1366,7 +1388,8 @@ pub(crate) fn spawn_worker(
                                             }
                                         }
 
-                                        if let Err(e) = std::fs::write(&target_file_path, &file_data)
+                                        if let Err(e) =
+                                            std::fs::write(&target_file_path, &file_data)
                                         {
                                             let err = format!(
                                                 "Failed to write file {}: {}",
@@ -1382,10 +1405,12 @@ pub(crate) fn spawn_worker(
                                         if let Some(timestamp_str) =
                                             file.manifest_name.strip_suffix(".manifest")
                                         {
-                                            if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(
-                                                timestamp_str,
-                                                "%Y.%m.%d-%H.%M.%S",
-                                            ) {
+                                            if let Ok(naive_dt) =
+                                                chrono::NaiveDateTime::parse_from_str(
+                                                    timestamp_str,
+                                                    "%Y.%m.%d-%H.%M.%S",
+                                                )
+                                            {
                                                 let dt = naive_dt.and_utc();
                                                 let system_time: std::time::SystemTime = dt.into();
                                                 if let Ok(f) = std::fs::OpenOptions::new()
@@ -1469,7 +1494,8 @@ pub(crate) fn spawn_worker(
                         {
                             // Update deployment_id in metadata if possible
                             if let Some(did) = extract_deployment_id(&manifest_info) {
-                                if let Some(mut meta) = crate::auth::load_local_metadata(&app_name) {
+                                if let Some(mut meta) = crate::auth::load_local_metadata(&app_name)
+                                {
                                     meta.metadata.deployment_id = Some(did);
                                     let _ = crate::auth::save_local_metadata(&app_name, &meta);
                                 }
@@ -1594,30 +1620,43 @@ pub(crate) fn spawn_worker(
                         ))
                     } else {
                         match client.get_game_assets(&platform) {
-                            Ok(assets) => assets.iter().find(|a| a.app_name == app_name).map(|asset| {
-                                version = asset.build_version.clone();
-                                (
-                                    platform.clone(),
-                                    asset.namespace.clone(),
-                                    asset.catalog_item_id.clone(),
-                                    asset.app_name.clone(),
-                                    asset.label_name.clone(),
-                                )
-                            }),
+                            Ok(assets) => {
+                                assets.iter().find(|a| a.app_name == app_name).map(|asset| {
+                                    version = asset.build_version.clone();
+                                    (
+                                        platform.clone(),
+                                        asset.namespace.clone(),
+                                        asset.catalog_item_id.clone(),
+                                        asset.app_name.clone(),
+                                        asset.label_name.clone(),
+                                    )
+                                })
+                            }
                             Err(e) => {
-                                log::error!("Failed to fetch assets for platform {}: {}", platform, e);
+                                log::error!(
+                                    "Failed to fetch assets for platform {}: {}",
+                                    platform,
+                                    e
+                                );
                                 None
                             }
                         }
                     };
 
                     if let Some((plat, namespace, catalog_id, app, label)) = asset_info {
-                        match client.get_asset_manifest(&plat, &namespace, &catalog_id, &app, &label)
-                        {
+                        match client.get_asset_manifest(
+                            &plat,
+                            &namespace,
+                            &catalog_id,
+                            &app,
+                            &label,
+                        ) {
                             Ok(manifest_info) => {
                                 // Update deployment_id in metadata if possible
                                 if let Some(did) = extract_deployment_id(&manifest_info) {
-                                    if let Some(mut meta) = crate::auth::load_local_metadata(&app_name) {
+                                    if let Some(mut meta) =
+                                        crate::auth::load_local_metadata(&app_name)
+                                    {
                                         meta.metadata.deployment_id = Some(did);
                                         let _ = crate::auth::save_local_metadata(&app_name, &meta);
                                     }
@@ -1662,7 +1701,11 @@ pub(crate) fn spawn_worker(
                                 }
                             }
                             Err(e) => {
-                                log::error!("Failed to fetch asset manifest for {}: {}", app_name, e)
+                                log::error!(
+                                    "Failed to fetch asset manifest for {}: {}",
+                                    app_name,
+                                    e
+                                )
                             }
                         }
                     } else if app_name != crate::eos::EOS_OVERLAY_APP_ID {
@@ -1685,18 +1728,25 @@ pub(crate) fn spawn_worker(
                                 cancel.clone(),
                                 pause.clone(),
                             );
-                            match downloader.download_game(&manifest, &install_path, selected_tags) {
+                            match downloader.download_game(&manifest, &install_path, selected_tags)
+                            {
                                 Ok(_) => success = true,
                                 Err(e) => {
-                                    let _ = tx
-                                        .send(WorkerResponse::Error(format!("Download failed: {}", e)));
+                                    let _ = tx.send(WorkerResponse::Error(format!(
+                                        "Download failed: {}",
+                                        e
+                                    )));
                                 }
                             }
                         } else {
-                            let _ = tx.send(WorkerResponse::Error("Failed to parse manifest".to_string()));
+                            let _ = tx.send(WorkerResponse::Error(
+                                "Failed to parse manifest".to_string(),
+                            ));
                         }
                     } else {
-                        let _ = tx.send(WorkerResponse::Error("Failed to fetch manifest".to_string()));
+                        let _ = tx.send(WorkerResponse::Error(
+                            "Failed to fetch manifest".to_string(),
+                        ));
                     }
 
                     if success {
@@ -1761,7 +1811,10 @@ pub(crate) fn spawn_worker(
                     let _ = crate::auth::save_installed_games(&installed);
 
                     let _ = tx.send(WorkerResponse::GamesScanned(installed));
-                    let _ = tx.send(WorkerResponse::TaskFinished(format!("Uninstalled {}", app_name)));
+                    let _ = tx.send(WorkerResponse::TaskFinished(format!(
+                        "Uninstalled {}",
+                        app_name
+                    )));
                     ctx.request_repaint();
                 }
                 WorkerMsg::ScanGames {
@@ -1790,7 +1843,9 @@ pub(crate) fn spawn_worker(
                     });
                     let installed = crate::auth::scan_egl_manifests();
                     let _ = tx.send(WorkerResponse::GamesScanned(installed));
-                    let _ = tx.send(WorkerResponse::TaskFinished("EGL Sync complete".to_string()));
+                    let _ = tx.send(WorkerResponse::TaskFinished(
+                        "EGL Sync complete".to_string(),
+                    ));
                     ctx.request_repaint();
                 }
                 WorkerMsg::FetchAdvancedInfo {
@@ -1859,7 +1914,8 @@ pub(crate) fn spawn_worker(
                                         ];
 
                                         for base_path in base_search_paths {
-                                            let possible_hints = vec![hint.clone(), hint.replace(" ", "")];
+                                            let possible_hints =
+                                                vec![hint.clone(), hint.replace(" ", "")];
                                             for h in possible_hints {
                                                 let p_hint = base_path.join(&h);
                                                 if p_hint.exists() {
@@ -1872,7 +1928,9 @@ pub(crate) fn spawn_worker(
                                                         }
 
                                                         // Check for Saved/SaveGames/AccountID (UE style)
-                                                        let p_saved = p_hint.join("Saved/SaveGames").join(aid);
+                                                        let p_saved = p_hint
+                                                            .join("Saved/SaveGames")
+                                                            .join(aid);
                                                         if p_saved.exists() {
                                                             resolved_path = Some(p_saved);
                                                             break;
@@ -1953,7 +2011,8 @@ pub(crate) fn spawn_worker(
                         eta: None,
                     });
 
-                    let manifest_path_opt = crate::auth::get_manifest_path(&app_name, &catalog_item_id);
+                    let manifest_path_opt =
+                        crate::auth::get_manifest_path(&app_name, &catalog_item_id);
                     let mut manifest_opt = None;
 
                     if let Some(manifest_path) = manifest_path_opt {
@@ -1984,7 +2043,9 @@ pub(crate) fn spawn_worker(
                             // Try common platforms if not found
                             for platform in &["Windows", "Mac", "Linux"] {
                                 if let Ok(assets) = client.get_game_assets(platform) {
-                                    if let Some(asset) = assets.iter().find(|a| a.app_name == app_name) {
+                                    if let Some(asset) =
+                                        assets.iter().find(|a| a.app_name == app_name)
+                                    {
                                         if let Ok(manifest_info) = client.get_asset_manifest(
                                             platform,
                                             &asset.namespace,
@@ -1993,9 +2054,10 @@ pub(crate) fn spawn_worker(
                                             &asset.label_name,
                                         ) {
                                             if let Some(url) = find_manifest_url(&manifest_info) {
-                                                if let Ok(manifest_data) = client
-                                                    .download_manifest(&url, Some(app_name.as_str()))
-                                                {
+                                                if let Ok(manifest_data) = client.download_manifest(
+                                                    &url,
+                                                    Some(app_name.as_str()),
+                                                ) {
                                                     manifest_opt = crate::manifest::parse_manifest(
                                                         &manifest_data,
                                                     )
@@ -2084,13 +2146,15 @@ pub(crate) fn spawn_worker(
                                 "ERROR: This game cannot run offline and no token was provided."
                             );
                             let _ = tx.send(WorkerResponse::Error(
-                                "This game cannot run offline and no token was provided".to_string(),
+                                "This game cannot run offline and no token was provided"
+                                    .to_string(),
                             ));
                             continue;
                         }
 
                         // [3/7] Cloud Save Sync
-                        let sync_enabled = game_settings.map(|s| s.cloud_sync_enabled).unwrap_or(true);
+                        let sync_enabled =
+                            game_settings.map(|s| s.cloud_sync_enabled).unwrap_or(true);
                         if !offline && sync_enabled {
                             println!("[3/7] Checking cloud saves...");
                             if let (Some(auth_token), Some(item)) =
@@ -2107,13 +2171,15 @@ pub(crate) fn spawn_worker(
                                         Ok(files) => {
                                             let mut remote_time = None;
                                             for file in &files {
-                                                if let Ok(dt) =
-                                                    DateTime::parse_from_rfc3339(&file.last_modified)
-                                                {
-                                                    let dt_utc = dt.with_timezone(&Utc);
-                                                    if remote_time.is_none() || dt_utc > remote_time.unwrap()
+                                                if let Some(last_modified) = &file.last_modified {
+                                                    if let Ok(dt) =
+                                                        DateTime::parse_from_rfc3339(last_modified)
                                                     {
-                                                        remote_time = Some(dt_utc);
+                                                        let dt_utc = dt.with_timezone(&Utc);
+                                                        if remote_time.is_none() || dt_utc > remote_time.unwrap()
+                                                        {
+                                                            remote_time = Some(dt_utc);
+                                                        }
                                                     }
                                                 }
                                             }
@@ -2145,7 +2211,9 @@ pub(crate) fn spawn_worker(
                                         ),
                                     }
                                 } else {
-                                    println!("      Save path not configured, skipping sync check.");
+                                    println!(
+                                        "      Save path not configured, skipping sync check."
+                                    );
                                 }
                             }
                         } else {
@@ -2184,7 +2252,10 @@ pub(crate) fn spawn_worker(
                                         }
                                     }
                                     Err(e) => {
-                                        println!("      Warning: Failed to run pre-launch command: {}", e);
+                                        println!(
+                                            "      Warning: Failed to run pre-launch command: {}",
+                                            e
+                                        );
                                     }
                                 }
                             }
@@ -2201,7 +2272,12 @@ pub(crate) fn spawn_worker(
                         }
 
                         if exe_path_opt.is_none() && !installed.executable.is_empty() {
-                            let p = path.join(installed.executable.replace('\\', "/").trim_start_matches('/'));
+                            let p = path.join(
+                                installed
+                                    .executable
+                                    .replace('\\', "/")
+                                    .trim_start_matches('/'),
+                            );
                             if p.exists() {
                                 exe_path_opt = Some(p);
                             }
@@ -2237,8 +2313,14 @@ pub(crate) fn spawn_worker(
                                     if p.is_file() {
                                         if let Some(ext) = p.extension() {
                                             if ext == "exe" {
-                                                let filename = p.file_name().unwrap().to_string_lossy().to_lowercase();
-                                                if !filename.contains("unins") && !filename.contains("crashreporter") {
+                                                let filename = p
+                                                    .file_name()
+                                                    .unwrap()
+                                                    .to_string_lossy()
+                                                    .to_lowercase();
+                                                if !filename.contains("unins")
+                                                    && !filename.contains("crashreporter")
+                                                {
                                                     exe_path_opt = Some(p);
                                                     break;
                                                 }
@@ -2262,7 +2344,10 @@ pub(crate) fn spawn_worker(
                         let force_ot = app_name == "HogwartsLegacy";
 
                         if !offline && (requires_ot || force_ot) {
-                            match client.get_ownership_token(&lib_item.unwrap().namespace, &installed.app_name) {
+                            match client.get_ownership_token(
+                                &lib_item.unwrap().namespace,
+                                &installed.app_name,
+                            ) {
                                 Ok(ot_bytes) => {
                                     if let Some(mut cache_dir) = crate::auth::get_config_dir() {
                                         cache_dir.push("cache");
@@ -2274,7 +2359,10 @@ pub(crate) fn spawn_worker(
                                     }
                                 }
                                 Err(e) => {
-                                    println!("      Warning: Failed to fetch ownership token: {}", e);
+                                    println!(
+                                        "      Warning: Failed to fetch ownership token: {}",
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -2283,8 +2371,11 @@ pub(crate) fn spawn_worker(
                         'search: {
                             if let Some(exe_path) = exe_path_opt {
                                 println!("      Executable: {:?}", exe_path);
-                                let namespace = local_meta.as_ref().map(|m| m.metadata.namespace.clone());
-                                let deployment_id = local_meta.as_ref().and_then(|m| m.metadata.deployment_id.clone());
+                                let namespace =
+                                    local_meta.as_ref().map(|m| m.metadata.namespace.clone());
+                                let deployment_id = local_meta
+                                    .as_ref()
+                                    .and_then(|m| m.metadata.deployment_id.clone());
 
                                 let mut cmd = if std::env::consts::OS == "linux" {
                                     let mut c = match game_settings
@@ -2300,13 +2391,18 @@ pub(crate) fn spawn_worker(
                                             command.env("UMU_ID", &app_name);
                                             command
                                         }
-                                        Some(CompatibilityTool::SteamProton) | Some(CompatibilityTool::CustomProtonWine) => {
+                                        Some(CompatibilityTool::SteamProton)
+                                        | Some(CompatibilityTool::CustomProtonWine) => {
                                             let tool_path = game_settings
                                                 .and_then(|s| s.custom_compatibility_path.clone())
-                                                .or_else(|| config.global.custom_compatibility_path.clone());
+                                                .or_else(|| {
+                                                    config.global.custom_compatibility_path.clone()
+                                                });
                                             if let Some(tp) = tool_path {
                                                 let mut command = if tp.join("proton").exists() {
-                                                    let mut c = std::process::Command::new(tp.join("proton"));
+                                                    let mut c = std::process::Command::new(
+                                                        tp.join("proton"),
+                                                    );
                                                     c.arg("run");
                                                     c
                                                 } else {
@@ -2330,7 +2426,8 @@ pub(crate) fn spawn_worker(
                                                 }
                                                 command
                                             } else {
-                                                let mut command = std::process::Command::new("wine");
+                                                let mut command =
+                                                    std::process::Command::new("wine");
                                                 let pfx_path = if let Some(gs) = game_settings {
                                                     if gs.use_custom_pfx {
                                                         gs.custom_pfx_path.clone()
@@ -2458,7 +2555,9 @@ pub(crate) fn spawn_worker(
                                 }
                                 if let Some(val) = game_settings
                                     .and_then(|s| s.steam_compat_client_install_path.as_ref())
-                                    .or_else(|| config.global.steam_compat_client_install_path.as_ref())
+                                    .or_else(|| {
+                                        config.global.steam_compat_client_install_path.as_ref()
+                                    })
                                 {
                                     cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", val);
                                 }
@@ -2496,11 +2595,16 @@ pub(crate) fn spawn_worker(
                                     let val = cmd
                                         .get_envs()
                                         .find(
-                                            |(k, _): &(&std::ffi::OsStr, Option<&std::ffi::OsStr>)| {
+                                            |(k, _): &(
+                                                &std::ffi::OsStr,
+                                                Option<&std::ffi::OsStr>,
+                                            )| {
                                                 k.to_str() == Some(var)
                                             },
                                         )
-                                        .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+                                        .and_then(|(_, v)| {
+                                            v.map(|v| v.to_string_lossy().into_owned())
+                                        })
                                         .or_else(|| std::env::var(var).ok())
                                         .unwrap_or_default();
                                     println!("{}: {}", var, val);
@@ -2519,7 +2623,8 @@ pub(crate) fn spawn_worker(
                                 match cmd.spawn() {
                                     Ok(mut child) => {
                                         println!("SUCCESS: Game launched successfully!");
-                                        let _ = tx.send(WorkerResponse::GameLaunched(app_name.clone()));
+                                        let _ =
+                                            tx.send(WorkerResponse::GameLaunched(app_name.clone()));
 
                                         let (stop_tx, stop_rx) = channel::<()>();
                                         stop_senders.insert(app_name.clone(), stop_tx);
@@ -2536,7 +2641,10 @@ pub(crate) fn spawn_worker(
                                                         #[cfg(unix)]
                                                         {
                                                             unsafe {
-                                                                libc::kill(child.id() as i32, libc::SIGTERM);
+                                                                libc::kill(
+                                                                    child.id() as i32,
+                                                                    libc::SIGTERM,
+                                                                );
                                                             }
                                                         }
 
@@ -2558,14 +2666,16 @@ pub(crate) fn spawn_worker(
                                                         }
                                                         break;
                                                     }
-                                                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                                        break
-                                                    }
+                                                    Err(
+                                                        std::sync::mpsc::TryRecvError::Disconnected,
+                                                    ) => break,
                                                     Err(std::sync::mpsc::TryRecvError::Empty) => {
                                                         match child.try_wait() {
                                                             Ok(Some(_)) => break,
                                                             _ => std::thread::sleep(
-                                                                std::time::Duration::from_millis(100),
+                                                                std::time::Duration::from_millis(
+                                                                    100,
+                                                                ),
                                                             ),
                                                         }
                                                     }
@@ -2580,7 +2690,11 @@ pub(crate) fn spawn_worker(
                                     }
                                     Err(e) => {
                                         println!("ERROR: Failed to launch game: {}", e);
-                                        log::error!("Failed to spawn process for {:?}: {}", exe_path, e);
+                                        log::error!(
+                                            "Failed to spawn process for {:?}: {}",
+                                            exe_path,
+                                            e
+                                        );
                                     }
                                 }
                             }

@@ -1,5 +1,19 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+fn deserialize_string_or_default<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn deserialize_option_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct AdvancedInfo {
@@ -116,6 +130,8 @@ pub struct GameInfo {
     pub partner_link_type: Option<String>,
     #[serde(rename = "eulaIds")]
     pub eula_ids: Option<Vec<String>>,
+    #[serde(rename = "dlcItemList", default)]
+    pub dlc_item_list: Vec<DlcItem>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -205,18 +221,26 @@ pub struct ReleaseInfo {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CloudSaveFile {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_default")]
     pub app_name: String,
-    #[serde(rename = "fileName", default)]
+    #[serde(
+        rename = "fileName",
+        default,
+        deserialize_with = "deserialize_string_or_default"
+    )]
     pub file_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_default")]
     pub manifest_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_default")]
     pub hash: String,
     #[serde(default)]
     pub length: u64,
-    #[serde(rename = "lastModified")]
-    pub last_modified: String,
+    #[serde(
+        rename = "lastModified",
+        default,
+        deserialize_with = "deserialize_option_string"
+    )]
+    pub last_modified: Option<String>,
     #[serde(rename = "readLink")]
     pub read_link: Option<String>,
     #[serde(rename = "writeLink")]
@@ -246,7 +270,6 @@ pub struct Entitlement {
     #[serde(rename = "grantDate")]
     pub grant_date: String,
 }
-
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadTicket {
