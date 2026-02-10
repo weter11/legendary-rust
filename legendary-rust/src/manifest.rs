@@ -1,6 +1,8 @@
-use std::io::{Read, Cursor, Seek, SeekFrom};
-use byteorder::{LittleEndian, BigEndian, ReadBytesExt};
+use std::io::{Read, Write, Cursor, Seek, SeekFrom};
+use byteorder::{LittleEndian, BigEndian, ReadBytesExt, WriteBytesExt};
 use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
 use std::collections::HashMap;
 use hex;
 
@@ -9,6 +11,7 @@ pub struct Manifest {
     pub meta: ManifestMeta,
     pub chunks: HashMap<[u32; 4], ChunkInfo>,
     pub files: HashMap<String, FileManifest>,
+    pub custom_fields: HashMap<String, String>,
     pub total_uncompressed_size: u64,
     pub total_download_size: u64,
 }
@@ -253,7 +256,7 @@ pub fn parse_manifest(data: &[u8]) -> anyhow::Result<Manifest> {
     let total_uncompressed_size = files.values().map(|f| f.file_size).sum();
     let total_download_size = chunks.values().map(|c| c.file_size as u64).sum();
 
-    Ok(Manifest { manifest_version, meta, chunks, files, total_uncompressed_size, total_download_size })
+    Ok(Manifest { manifest_version, meta, chunks, files, custom_fields: HashMap::new(), total_uncompressed_size, total_download_size })
 }
 
 fn read_fstring<R: Read>(mut reader: R) -> anyhow::Result<String> {
@@ -285,6 +288,233 @@ fn read_fstring<R: Read>(mut reader: R) -> anyhow::Result<String> {
         let s = std::str::from_utf8(&buf[..buf.len()-1])?.to_string();
         Ok(s)
     }
+}
+
+lazy_static::lazy_static! {
+    static ref ROLLING_HASH_TABLE: [u64; 256] = {
+        let mut table = [0u64; 256];
+        let hash_poly = 0xC96C5795D7870F42u64;
+        for i in 0..256 {
+            let mut v = i as u64;
+            for _ in 0..8 {
+                if v & 1 != 0 {
+                    v >>= 1;
+                    v ^= hash_poly;
+                } else {
+                    v >>= 1;
+                }
+            }
+            table[i] = v;
+        }
+        table
+    };
+}
+
+pub fn get_rolling_hash(data: &[u8]) -> u64 {
+    let mut h: u64 = 0;
+    for &b in data {
+        h = ((h << 1 | h >> 63) ^ ROLLING_HASH_TABLE[b as usize]) & 0xffffffffffffffff;
+    }
+    h
+}
+
+fn write_fstring<W: Write>(mut writer: W, s: &str) -> anyhow::Result<()> {
+    if s.is_empty() {
+        writer.write_i32::<LittleEndian>(0)?;
+        return Ok(());
+    }
+
+    // Try ASCII first
+    if s.chars().all(|c| c.is_ascii()) {
+        writer.write_i32::<LittleEndian>(s.len() as i32 + 1)?;
+        writer.write_all(s.as_bytes())?;
+        writer.write_all(&[0u8])?;
+    } else {
+        // UTF-16LE
+        let utf16: Vec<u16> = s.encode_utf16().collect();
+        writer.write_i32::<LittleEndian>(-(utf16.len() as i32 + 1))?;
+        for &u in &utf16 {
+            writer.write_u16::<LittleEndian>(u)?;
+        }
+        writer.write_u16::<LittleEndian>(0)?;
+    }
+    Ok(())
+}
+
+impl Manifest {
+    pub fn serialize(&self) -> anyhow::Result<Vec<u8>> {
+        let mut body = Vec::new();
+
+        // Meta
+        let meta_start = body.len();
+        body.write_u32::<LittleEndian>(0)?; // Placeholder size
+        body.write_u8(1)?; // data_version (1 for build_id support)
+        body.write_u32::<LittleEndian>(self.manifest_version)?;
+        body.write_u8(0)?; // is_file_data
+        body.write_u32::<LittleEndian>(0)?; // app_id
+
+        write_fstring(&mut body, &self.meta.app_name)?;
+        write_fstring(&mut body, &self.meta.build_version)?;
+        write_fstring(&mut body, &self.meta.launch_exe)?;
+        write_fstring(&mut body, &self.meta.launch_command)?;
+
+        body.write_u32::<LittleEndian>(0)?; // prereq_ids count
+        write_fstring(&mut body, "")?; // prereq_name
+        write_fstring(&mut body, "")?; // prereq_path
+        write_fstring(&mut body, "")?; // prereq_args
+
+        // build_id (for data_version >= 1)
+        write_fstring(&mut body, "")?;
+
+        let meta_end = body.len();
+        let meta_size = (meta_end - meta_start) as u32;
+        (&mut body[meta_start..meta_start + 4]).write_u32::<LittleEndian>(meta_size)?;
+
+        // CDL
+        let cdl_start = body.len();
+        body.write_u32::<LittleEndian>(0)?; // Placeholder size
+        body.write_u8(0)?; // version
+        body.write_u32::<LittleEndian>(self.chunks.len() as u32)?;
+
+        let mut sorted_chunks: Vec<_> = self.chunks.values().collect();
+        sorted_chunks.sort_by_key(|c| c.guid);
+
+        for c in &sorted_chunks {
+            for &g in &c.guid {
+                body.write_u32::<LittleEndian>(g)?;
+            }
+        }
+        for c in &sorted_chunks {
+            body.write_u64::<LittleEndian>(c.hash)?;
+        }
+        for c in &sorted_chunks {
+            body.write_all(&c.sha_hash)?;
+        }
+        for c in &sorted_chunks {
+            body.write_u8(c.group_num)?;
+        }
+        for c in &sorted_chunks {
+            body.write_u32::<LittleEndian>(c.window_size)?;
+        }
+        for c in &sorted_chunks {
+            body.write_i64::<LittleEndian>(c.file_size)?;
+        }
+
+        let cdl_end = body.len();
+        let cdl_size = (cdl_end - cdl_start) as u32;
+        (&mut body[cdl_start..cdl_start + 4]).write_u32::<LittleEndian>(cdl_size)?;
+
+        // FML
+        let fml_start = body.len();
+        body.write_u32::<LittleEndian>(0)?; // Placeholder size
+        body.write_u8(0)?; // version
+        body.write_u32::<LittleEndian>(self.files.len() as u32)?;
+
+        let mut sorted_files: Vec<_> = self.files.values().collect();
+        sorted_files.sort_by(|a, b| a.filename.cmp(&b.filename));
+
+        for f in &sorted_files {
+            write_fstring(&mut body, &f.filename)?;
+        }
+        for _ in 0..self.files.len() {
+            write_fstring(&mut body, "")?; // symlink
+        }
+        for f in &sorted_files {
+            body.write_all(&f.hash)?;
+        }
+        for _ in 0..self.files.len() {
+            body.write_u8(0)?; // flags
+        }
+        for f in &sorted_files {
+            body.write_u32::<LittleEndian>(f.install_tags.len() as u32)?;
+            for t in &f.install_tags {
+                write_fstring(&mut body, t)?;
+            }
+        }
+        for f in &sorted_files {
+            body.write_u32::<LittleEndian>(f.chunk_parts.len() as u32)?;
+            for p in &f.chunk_parts {
+                body.write_u32::<LittleEndian>(28)?; // part size
+                for &g in &p.guid {
+                    body.write_u32::<LittleEndian>(g)?;
+                }
+                body.write_u32::<LittleEndian>(p.offset)?;
+                body.write_u32::<LittleEndian>(p.size)?;
+            }
+        }
+
+        let fml_end = body.len();
+        let fml_size = (fml_end - fml_start) as u32;
+        (&mut body[fml_start..fml_start + 4]).write_u32::<LittleEndian>(fml_size)?;
+
+        // Custom Fields
+        let cf_start = body.len();
+        body.write_u32::<LittleEndian>(0)?; // Placeholder size
+        body.write_u8(0)?; // version
+        body.write_u32::<LittleEndian>(self.custom_fields.len() as u32)?;
+
+        let mut sorted_keys: Vec<_> = self.custom_fields.keys().collect();
+        sorted_keys.sort();
+
+        for &k in &sorted_keys {
+            write_fstring(&mut body, k)?;
+        }
+        for &k in &sorted_keys {
+            write_fstring(&mut body, &self.custom_fields[k])?;
+        }
+
+        let cf_end = body.len();
+        let cf_size = (cf_end - cf_start) as u32;
+        (&mut body[cf_start..cf_start + 4]).write_u32::<LittleEndian>(cf_size)?;
+
+        // Header
+        let uncompressed_size = body.len() as u32;
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&body)?;
+        let compressed_body = encoder.finish()?;
+        let compressed_size = compressed_body.len() as u32;
+
+        let mut hasher = sha1::Sha1::new();
+        hasher.update(&body);
+        let sha_hash = hasher.finalize();
+
+        let mut header = Vec::new();
+        header.write_u32::<LittleEndian>(0x44BEC00C)?;
+        header.write_u32::<LittleEndian>(41)?; // header size
+        header.write_u32::<LittleEndian>(uncompressed_size)?;
+        header.write_u32::<LittleEndian>(compressed_size)?;
+        header.write_all(&sha_hash)?;
+        header.write_u8(1)?; // stored_as (compressed)
+        header.write_u32::<LittleEndian>(self.manifest_version)?;
+        header.write_all(&compressed_body)?;
+
+        Ok(header)
+    }
+}
+
+pub fn serialize_chunk(raw_data: &[u8], guid: [u32; 4], rolling_hash: u64, sha_hash: [u8; 20]) -> anyhow::Result<Vec<u8>> {
+    let uncompressed_size = raw_data.len() as u32;
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(raw_data)?;
+    let compressed_data = encoder.finish()?;
+    let compressed_size = compressed_data.len() as u32;
+
+    let mut chunk = Vec::new();
+    chunk.write_u32::<BigEndian>(0xB1FE3AA2)?;
+    chunk.write_u32::<LittleEndian>(3)?; // header_version
+    chunk.write_u32::<LittleEndian>(66)?; // header_size
+    chunk.write_u32::<LittleEndian>(compressed_size)?;
+    for &g in &guid {
+        chunk.write_u32::<LittleEndian>(g)?;
+    }
+    chunk.write_u64::<LittleEndian>(rolling_hash)?;
+    chunk.write_u8(1)?; // stored_as (compressed)
+    chunk.write_all(&sha_hash)?;
+    chunk.write_u8(3)?; // hash_type (rolling + sha1)
+    chunk.write_u32::<LittleEndian>(uncompressed_size)?;
+    chunk.write_all(&compressed_data)?;
+
+    Ok(chunk)
 }
 
 pub fn parse_chunk(data: &[u8]) -> anyhow::Result<Vec<u8>> {

@@ -10,12 +10,14 @@ use crate::models::InstalledGame;
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc, SecondsFormat};
 
 use crate::config::{AppConfig, CompatibilityTool};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use rand::Rng;
+use sha1::{Sha1, Digest};
 
 pub struct LegendaryApp {
     token: Option<OAuthToken>,
@@ -864,28 +866,176 @@ impl LegendaryApp {
                         ctx_clone.request_repaint();
                     }
                     WorkerMsg::UploadCloudSave { app_name, namespace, save_path } => {
-                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
+                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Packaging and uploading saves for {}", app_name), progress: 0.0, is_paused: false, speed: None, eta: None });
                         if let Ok(token) = crate::auth::load_token() {
-                            let files = get_all_files(&save_path);
-                            let total = files.len();
-                            let mut success = true;
-                            for (i, file_path) in files.iter().enumerate() {
-                                if let Ok(data) = std::fs::read(file_path) {
-                                    let rel_path = file_path.strip_prefix(&save_path).unwrap_or(file_path);
-                                    let filename = format!("manifests/{}", rel_path.to_string_lossy());
-                                    match client.upload_cloud_file(&namespace, &token.account_id, &app_name, &filename, data) {
-                                        Ok(_) => {},
-                                        Err(e) => {
-                                            let _ = tx.send(WorkerResponse::Error(format!("Failed to upload {}: {}", filename, e)));
-                                            success = false;
-                                            break;
-                                        }
+                            let mut files_to_package = get_all_files(&save_path);
+                            if files_to_package.is_empty() {
+                                let _ = tx.send(WorkerResponse::TaskFinished(format!("No save files found for {} to upload.", app_name)));
+                                return;
+                            }
+                            files_to_package.sort_by(|a, b| a.to_string_lossy().to_lowercase().cmp(&b.to_string_lossy().to_lowercase()));
+
+                            let mut manifest = crate::manifest::Manifest {
+                                manifest_version: 18,
+                                meta: crate::manifest::ManifestMeta {
+                                    app_name: format!("{}{}", app_name, token.account_id),
+                                    build_version: Utc::now().format("%Y.%m.%d-%H.%M.%S").to_string(),
+                                    ..Default::default()
+                                },
+                                chunks: HashMap::new(),
+                                files: HashMap::new(),
+                                custom_fields: HashMap::new(),
+                                total_uncompressed_size: 0,
+                                total_download_size: 0,
+                            };
+
+                            // Get CloudSaveFolder from metadata
+                            let local_meta = crate::auth::load_local_metadata(&app_name);
+                            if let Some(meta) = local_meta {
+                                if let Some(attrs) = meta.metadata.custom_attributes {
+                                    if let Some(attr) = attrs.get("CloudSaveFolder") {
+                                        manifest.custom_fields.insert("CloudSaveFolder".to_string(), attr.value.clone());
                                     }
                                 }
-                                let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false, speed: None, eta: None });
                             }
-                            if success {
-                                let _ = tx.send(WorkerResponse::TaskFinished(format!("Upload for {} complete. {} files uploaded.", app_name, total)));
+
+                            let mut chunks_data = HashMap::new();
+                            let mut current_chunk_data = Vec::with_capacity(1024 * 1024);
+                            let mut current_chunk_guid = [rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>()];
+
+                            for file_path in &files_to_package {
+                                if let Ok(data) = std::fs::read(file_path) {
+                                    let rel_path = file_path.strip_prefix(&save_path).unwrap_or(file_path).to_string_lossy().replace('\\', "/");
+                                    let mut file_manifest = crate::manifest::FileManifest {
+                                        filename: rel_path.clone(),
+                                        hash: [0u8; 20],
+                                        chunk_parts: Vec::new(),
+                                        file_size: data.len() as u64,
+                                        install_tags: Vec::new(),
+                                    };
+
+                                    let mut hasher = Sha1::new();
+                                    hasher.update(&data);
+                                    file_manifest.hash = hasher.finalize().into();
+
+                                    let mut file_offset = 0;
+                                    while file_offset < data.len() {
+                                        let remaining_in_chunk = 1024 * 1024 - current_chunk_data.len();
+                                        let to_copy = std::cmp::min(remaining_in_chunk, data.len() - file_offset);
+
+                                        file_manifest.chunk_parts.push(crate::manifest::ChunkPart {
+                                            guid: current_chunk_guid,
+                                            offset: current_chunk_data.len() as u32,
+                                            size: to_copy as u32,
+                                            file_offset: file_offset as u64,
+                                        });
+
+                                        current_chunk_data.extend_from_slice(&data[file_offset..file_offset + to_copy]);
+                                        file_offset += to_copy;
+
+                                        if current_chunk_data.len() >= 1024 * 1024 {
+                                            let mut chunk_sha1 = Sha1::new();
+                                            chunk_sha1.update(&current_chunk_data);
+                                            let sha_hash: [u8; 20] = chunk_sha1.finalize().into();
+                                            let rolling = crate::manifest::get_rolling_hash(&current_chunk_data);
+
+                                            let chunk_info = crate::manifest::ChunkInfo {
+                                                guid: current_chunk_guid,
+                                                hash: rolling,
+                                                sha_hash,
+                                                group_num: (rolling % 100) as u8,
+                                                window_size: 1024 * 1024,
+                                                file_size: 0, // Will be set after compression
+                                            };
+
+                                            let serialized = crate::manifest::serialize_chunk(&current_chunk_data, current_chunk_guid, rolling, sha_hash).unwrap();
+                                            let mut chunk_info_final = chunk_info.clone();
+                                            chunk_info_final.file_size = serialized.len() as i64;
+
+                                            manifest.chunks.insert(current_chunk_guid, chunk_info_final);
+                                            chunks_data.insert(chunk_info.path(manifest.manifest_version), serialized);
+
+                                            current_chunk_data.clear();
+                                            current_chunk_guid = [rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>(), rand::thread_rng().gen::<u32>()];
+                                        }
+                                    }
+                                    manifest.files.insert(rel_path, file_manifest);
+                                }
+                            }
+
+                            if !current_chunk_data.is_empty() {
+                                let unpadded_len = current_chunk_data.len();
+                                let mut padded_data = current_chunk_data.clone();
+                                padded_data.resize(1024 * 1024, 0);
+
+                                let mut chunk_sha1 = Sha1::new();
+                                chunk_sha1.update(&padded_data);
+                                let sha_hash: [u8; 20] = chunk_sha1.finalize().into();
+                                let rolling = crate::manifest::get_rolling_hash(&padded_data);
+
+                                let chunk_info = crate::manifest::ChunkInfo {
+                                    guid: current_chunk_guid,
+                                    hash: rolling,
+                                    sha_hash,
+                                    group_num: (rolling % 100) as u8,
+                                    window_size: unpadded_len as u32,
+                                    file_size: 0,
+                                };
+
+                                let serialized = crate::manifest::serialize_chunk(&current_chunk_data, current_chunk_guid, rolling, sha_hash).unwrap();
+                                let mut chunk_info_final = chunk_info.clone();
+                                chunk_info_final.file_size = serialized.len() as i64;
+
+                                manifest.chunks.insert(current_chunk_guid, chunk_info_final);
+                                chunks_data.insert(chunk_info.path(manifest.manifest_version), serialized);
+                            }
+
+                            let manifest_serialized = manifest.serialize().unwrap();
+                            let manifest_path = format!("manifests/{}.manifest", manifest.meta.build_version);
+
+                            let mut all_uploads = chunks_data;
+                            all_uploads.insert(manifest_path.clone(), manifest_serialized);
+
+                            let filenames: Vec<String> = all_uploads.keys().cloned().collect();
+
+                            println!("Generated cloud save manifest and {} chunks for {}", all_uploads.len() - 1, app_name);
+
+                            match client.get_cloud_save_links(&token.account_id, &app_name, &filenames) {
+                                Ok(links) => {
+                                    let total = links.len();
+                                    let mut success = true;
+                                    for (i, (remote_path, link_info)) in links.iter().enumerate() {
+                                        if let Some(write_link) = &link_info.write_link {
+                                            let data = all_uploads.get(remote_path).unwrap();
+                                            match client.client.put(write_link).body(data.clone()).send() {
+                                                Ok(resp) if resp.status().is_success() => {},
+                                                Ok(resp) => {
+                                                    let err = format!("Failed to upload chunk {}: {}", remote_path, resp.status());
+                                                    eprintln!("{}", err);
+                                                    let _ = tx.send(WorkerResponse::Error(err));
+                                                    success = false;
+                                                    break;
+                                                },
+                                                Err(e) => {
+                                                    let err = format!("Failed to upload chunk {}: {}", remote_path, e);
+                                                    eprintln!("{}", err);
+                                                    let _ = tx.send(WorkerResponse::Error(err));
+                                                    success = false;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        let _ = tx.send(WorkerResponse::TaskProgress { task_name: format!("Uploading saves for {}", app_name), progress: (i + 1) as f32 / total as f32, is_paused: false, speed: None, eta: None });
+                                    }
+                                    if success {
+                                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Upload for {} complete. {} files processed.", app_name, total)));
+                                    }
+                                },
+                                Err(e) => {
+                                    let err = format!("Failed to create cloud save entries: {}", e);
+                                    eprintln!("{}", err);
+                                    let _ = tx.send(WorkerResponse::Error(err));
+                                }
                             }
                         } else {
                             let _ = tx.send(WorkerResponse::Error("Not logged in".to_string()));
@@ -904,7 +1054,9 @@ impl LegendaryApp {
                                         let manifest_data = match client.download_cloud_file(&namespace, &token.account_id, &app_name, &file.file_name) {
                                             Ok(d) => d,
                                             Err(e) => {
-                                                let _ = tx.send(WorkerResponse::Error(format!("Failed to download manifest {}: {}", file.file_name, e)));
+                                                let err = format!("Failed to download manifest {}: {}", file.file_name, e);
+                                                eprintln!("{}", err);
+                                                let _ = tx.send(WorkerResponse::Error(err));
                                                 success = false;
                                                 break;
                                             }
@@ -913,7 +1065,9 @@ impl LegendaryApp {
                                         let manifest = match crate::manifest::parse_manifest(&manifest_data) {
                                             Ok(m) => m,
                                             Err(e) => {
-                                                let _ = tx.send(WorkerResponse::Error(format!("Failed to parse manifest {}: {}", file.file_name, e)));
+                                                let err = format!("Failed to parse manifest {}: {}", file.file_name, e);
+                                                eprintln!("{}", err);
+                                                let _ = tx.send(WorkerResponse::Error(err));
                                                 success = false;
                                                 break;
                                             }
@@ -923,7 +1077,9 @@ impl LegendaryApp {
                                         let chunk_links = match client.get_cloud_save_links(&token.account_id, &app_name, &chunk_paths) {
                                             Ok(links) => links,
                                             Err(e) => {
-                                                let _ = tx.send(WorkerResponse::Error(format!("Failed to get chunk links: {}", e)));
+                                                let err = format!("Failed to get chunk links: {}", e);
+                                                eprintln!("{}", err);
+                                                let _ = tx.send(WorkerResponse::Error(err));
                                                 success = false;
                                                 break;
                                             }
@@ -953,7 +1109,9 @@ impl LegendaryApp {
                                             let chunk_data = match client.download_manifest(read_link, None) {
                                                 Ok(d) => d,
                                                 Err(e) => {
-                                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to download chunk {}: {}", path, e)));
+                                                    let err = format!("Failed to download chunk {}: {}", path, e);
+                                                    eprintln!("{}", err);
+                                                    let _ = tx.send(WorkerResponse::Error(err));
                                                     success = false;
                                                     break;
                                                 }
@@ -962,7 +1120,9 @@ impl LegendaryApp {
                                             let raw_data = match crate::manifest::parse_chunk(&chunk_data) {
                                                 Ok(d) => d,
                                                 Err(e) => {
-                                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to parse chunk {}: {}", path, e)));
+                                                    let err = format!("Failed to parse chunk {}: {}", path, e);
+                                                    eprintln!("{}", err);
+                                                    let _ = tx.send(WorkerResponse::Error(err));
                                                     success = false;
                                                     break;
                                                 }
@@ -1017,7 +1177,9 @@ impl LegendaryApp {
                                             }
 
                                             if let Err(e) = std::fs::write(&target_file_path, &file_data) {
-                                                let _ = tx.send(WorkerResponse::Error(format!("Failed to write file {}: {}", file_manifest.filename, e)));
+                                                let err = format!("Failed to write file {}: {}", file_manifest.filename, e);
+                                                eprintln!("{}", err);
+                                                let _ = tx.send(WorkerResponse::Error(err));
                                                 success = false;
                                                 break;
                                             }
@@ -1037,11 +1199,15 @@ impl LegendaryApp {
                                         manifests_downloaded += 1;
                                     }
                                     if success {
-                                        let _ = tx.send(WorkerResponse::TaskFinished(format!("Cloud save download for {} complete. {} manifests processed.", app_name, manifests_downloaded)));
+                                        let msg = format!("Cloud save download for {} complete. {} manifests processed. Save path: {}", app_name, manifests_downloaded, save_path.display());
+                                        println!("{}", msg);
+                                        let _ = tx.send(WorkerResponse::TaskFinished(msg));
                                     }
                                 }
                                 Err(e) => {
-                                    let _ = tx.send(WorkerResponse::Error(format!("Failed to get cloud metadata: {}", e)));
+                                    let err = format!("Failed to get cloud metadata: {}", e);
+                                    eprintln!("{}", err);
+                                    let _ = tx.send(WorkerResponse::Error(err));
                                 }
                             }
                         } else {
