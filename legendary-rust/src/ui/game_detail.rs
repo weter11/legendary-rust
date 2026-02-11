@@ -592,22 +592,6 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                     }
                 });
 
-                ui.add_space(10.0);
-                ui.collapsing("Detailed Info", |ui| {
-                    if let Some(meta) = &local_meta {
-                        ui.label(format!("ID: {}", meta.metadata.id));
-                        ui.label(format!("Namespace: {}", meta.metadata.namespace));
-                        if let Some(did) = &meta.metadata.deployment_id {
-                            ui.label(format!("Deployment ID: {}", did));
-                        }
-                        if let Some(attrs) = &meta.metadata.custom_attributes {
-                            for (k, v) in attrs {
-                                ui.label(format!("{}: {}", k, v.value));
-                            }
-                        }
-                    }
-                });
-
                 if changed {
                     let _ = app.config.save();
                 }

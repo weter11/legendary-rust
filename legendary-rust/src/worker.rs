@@ -110,7 +110,6 @@ pub(crate) enum WorkerMsg {
         catalog_item_id: String,
         search_paths: Vec<std::path::PathBuf>,
     },
-    CheckForUpdates,
 }
 
 pub(crate) enum WorkerResponse {
@@ -149,7 +148,6 @@ pub(crate) enum WorkerResponse {
     GameStopped(String),
     EosStatusFetched(crate::eos::EosOverlayStatus),
     AdvancedInfoFetched(AdvancedInfo),
-    UpdateCheckResult(String),
 }
 
 fn extract_eula_keys(raw_id: &str) -> Vec<String> {
@@ -247,35 +245,6 @@ pub(crate) fn spawn_worker(
                 }
                 WorkerMsg::ResumeTask => {
                     continue;
-                }
-                WorkerMsg::CheckForUpdates => {
-                    match client.get_legendary_version_info() {
-                        Ok(info) => {
-                            let latest = info["release_info"]["version"]
-                                .as_str()
-                                .unwrap_or("unknown");
-                            let url = info["release_info"]["release_url"]
-                                .as_str()
-                                .unwrap_or("https://github.com/derrod/legendary/releases");
-                            let current = env!("CARGO_PKG_VERSION");
-                            let msg = if latest != "unknown" && latest != current {
-                                format!(
-                                    "Update available: Legendary {} (current {}). {}",
-                                    latest, current, url
-                                )
-                            } else {
-                                format!("Legendary is up to date ({})", current)
-                            };
-                            let _ = tx.send(WorkerResponse::UpdateCheckResult(msg));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(WorkerResponse::UpdateCheckResult(format!(
-                                "Update check failed: {}",
-                                e
-                            )));
-                        }
-                    }
-                    ctx.request_repaint();
                 }
                 WorkerMsg::StopGame(app_name) => {
                     if let Some(stop_tx) = stop_senders.remove(&app_name) {
