@@ -53,6 +53,7 @@ pub(crate) enum WorkerMsg {
     AcceptEula {
         eula_id: String,
         version: i32,
+        locale: Option<String>,
     },
     LaunchOrigin(String),
     UploadCloudSave {
@@ -141,6 +142,29 @@ pub(crate) enum WorkerResponse {
     GameStopped(String),
     EosStatusFetched(crate::eos::EosOverlayStatus),
     AdvancedInfoFetched(AdvancedInfo),
+}
+
+fn extract_eula_keys(raw_id: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut run = String::new();
+
+    for ch in raw_id.chars() {
+        if ch.is_ascii_hexdigit() {
+            run.push(ch.to_ascii_lowercase());
+            if run.len() == 32 {
+                keys.push(run.clone());
+                run.clear();
+            }
+        } else {
+            run.clear();
+        }
+    }
+
+    if keys.is_empty() && raw_id.len() == 32 && raw_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        keys.push(raw_id.to_ascii_lowercase());
+    }
+
+    keys
 }
 
 pub(crate) fn spawn_worker(
@@ -667,63 +691,61 @@ pub(crate) fn spawn_worker(
                 }
                 WorkerMsg::CheckEula(eula_ids) => {
                     let mut unaccepted = Vec::new();
-                    for id in eula_ids {
-                        match client.eula_get_status(&id) {
-                            Ok(Some(eula)) => unaccepted.push(eula),
-                            Ok(None) => {}
-                            Err(e) => log::warn!("Failed to check EULA status for {}: {}", id, e),
+                    let mut seen = std::collections::HashSet::new();
+                    for raw_id in eula_ids {
+                        for id in extract_eula_keys(&raw_id) {
+                            if !seen.insert(id.clone()) {
+                                continue;
+                            }
+                            match client.eula_get_status(&id) {
+                                Ok(Some(eula)) => unaccepted.push(eula),
+                                Ok(None) => {}
+                                Err(e) => {
+                                    log::warn!("Failed to check EULA status for {}: {}", id, e)
+                                }
+                            }
                         }
                     }
                     let _ = tx.send(WorkerResponse::EulaStatusFetched(unaccepted));
                     ctx.request_repaint();
                 }
-                WorkerMsg::AcceptEula { eula_id, version } => {
-                    match client.eula_accept(&eula_id, version, None) {
-                        Ok(_) => {
-                            // Re-check if other EULAs exist
-                            // Simplified: assume it was the only one or user will refresh
+                WorkerMsg::AcceptEula {
+                    eula_id,
+                    version,
+                    locale,
+                } => match client.eula_accept(&eula_id, version, locale.as_deref()) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let _ = tx.send(WorkerResponse::Error(format!(
+                            "Failed to accept EULA: {}",
+                            e
+                        )));
+                    }
+                },
+                WorkerMsg::LaunchOrigin(app_name) => {
+                    let user_name = client.get_display_name().unwrap_or_default();
+                    let extra_args = cached_library_items
+                        .iter()
+                        .find(|i| i.app_name == app_name)
+                        .and_then(|item| item.metadata.as_ref())
+                        .and_then(|meta| {
+                            meta["customAttributes"]["AdditionalCommandline"]["value"].as_str()
+                        })
+                        .map(|s| s.to_string());
+
+                    match client.get_origin_uri(&app_name, &user_name, "en", extra_args.as_deref())
+                    {
+                        Ok(url) => {
+                            let _ = tx.send(WorkerResponse::OriginUriFetched(url));
                         }
                         Err(e) => {
                             let _ = tx.send(WorkerResponse::Error(format!(
-                                "Failed to accept EULA: {}",
+                                "Failed to generate Origin URI: {}",
                                 e
                             )));
                         }
                     }
                 }
-                WorkerMsg::LaunchOrigin(app_name) => match client.get_game_token() {
-                    Ok(token) => {
-                        let user_name = client.get_display_name().unwrap_or_default();
-                        let account_id = client.get_account_id().unwrap_or_default();
-                        let mut url = format!("link2ea://launchgame/{}?AUTH_PASSWORD={}&AUTH_TYPE=exchangecode&epicusername={}&epicuserid={}&epiclocale=en",
-                                app_name, token, urlencoding::encode(&user_name), account_id);
-
-                        // Find metadata for extra args if any
-                        if let Some(item) =
-                            cached_library_items.iter().find(|i| i.app_name == app_name)
-                        {
-                            if let Some(meta) = &item.metadata {
-                                if let Some(extra) = meta["customAttributes"]
-                                    ["AdditionalCommandline"]["value"]
-                                    .as_str()
-                                {
-                                    for part in extra.split('&') {
-                                        url.push('&');
-                                        url.push_str(part);
-                                    }
-                                }
-                            }
-                        }
-
-                        let _ = tx.send(WorkerResponse::OriginUriFetched(url));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(WorkerResponse::Error(format!(
-                            "Failed to get game token for Origin: {}",
-                            e
-                        )));
-                    }
-                },
                 WorkerMsg::SyncCloudSaves {
                     app_name,
                     namespace,
@@ -1167,17 +1189,12 @@ pub(crate) fn spawn_worker(
                                 let mut success = true;
                                 let mut manifests_downloaded = 0;
                                 for file in manifest_files {
-                                    let manifest_data = match client.download_cloud_file(
-                                        &namespace,
-                                        &token.account_id,
-                                        &app_name,
-                                        &file.file_name,
-                                    ) {
-                                        Ok(d) => d,
-                                        Err(e) => {
+                                    let read_link = match file.read_link.as_ref() {
+                                        Some(link) => link,
+                                        None => {
                                             let err = format!(
-                                                "Failed to download manifest {}: {}",
-                                                file.file_name, e
+                                                "Manifest {} is missing readLink",
+                                                file.file_name
                                             );
                                             eprintln!("{}", err);
                                             let _ = tx.send(WorkerResponse::Error(err));
@@ -1185,6 +1202,21 @@ pub(crate) fn spawn_worker(
                                             break;
                                         }
                                     };
+
+                                    let manifest_data =
+                                        match client.download_manifest(read_link, None) {
+                                            Ok(d) => d,
+                                            Err(e) => {
+                                                let err = format!(
+                                                    "Failed to download manifest {}: {}",
+                                                    file.file_name, e
+                                                );
+                                                eprintln!("{}", err);
+                                                let _ = tx.send(WorkerResponse::Error(err));
+                                                success = false;
+                                                break;
+                                            }
+                                        };
 
                                     println!(
                                         "[CloudSave][Download] Received manifest {} ({} bytes)",

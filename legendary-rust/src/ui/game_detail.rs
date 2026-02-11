@@ -77,30 +77,72 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                         }
                     }
 
-                    // Ubisoft Support
+                    let third_party_store = game
+                        .custom_attributes
+                        .as_ref()
+                        .and_then(|attrs| attrs.get("ThirdPartyManagedApp"))
+                        .map(|a| a.value.to_lowercase())
+                        .or_else(|| {
+                            local_meta
+                                .as_ref()
+                                .and_then(|m| m.metadata.custom_attributes.as_ref())
+                                .and_then(|attrs| attrs.get("ThirdPartyManagedApp"))
+                                .map(|a| a.value.to_lowercase())
+                        });
+                    let is_origin_game = third_party_store
+                        .as_deref()
+                        .map(|s| s == "origin" || s == "the ea app" || s.contains("origin") || s.contains("ea app"))
+                        .unwrap_or(false);
+
+                    if is_origin_game {
+                        ui.group(|ui| {
+                            ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ EA/Origin title detected");
+                            ui.label("Use Origin/EA App activation flow for this title (as in Legendary CLI --origin).");
+                            if ui.button(egui::RichText::new("🚀 Launch via Origin/EA App").strong()).clicked() {
+                                let _ = app.tx.send(WorkerMsg::LaunchOrigin(app_name.clone()));
+                            }
+                        });
+                    }
+
+                    let ubisoft_partner = game
+                        .partner_link_type
+                        .as_ref()
+                        .map(|p| p.eq_ignore_ascii_case("ubisoft"))
+                        .unwrap_or(false);
+                    let requires_uplay_launcher = app
+                        .installed_games
+                        .iter()
+                        .find(|g| g.app_name == app_name)
+                        .map(|g| g.executable.eq_ignore_ascii_case("UplayLaunch.exe"))
+                        .unwrap_or(false);
+
                     if let Some(partner) = &game.partner_link_type {
-                        if partner.to_lowercase() == "ubisoft" {
+                        if !partner.eq_ignore_ascii_case("ubisoft") {
                             ui.group(|ui| {
-                                ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ Ubisoft title detected");
-                                ui.label("This game requires activation on Ubisoft Connect.");
-                                if ui.button("Open Ubisoft Activation Guide").clicked() {
-                                    let _ = open::that("https://github.com/derrod/legendary/wiki/Ubisoft-Activation");
-                                }
+                                ui.colored_label(
+                                    egui::Color32::YELLOW,
+                                    format!(
+                                        "⚠ This game requires linking to '{}' and may not work yet.",
+                                        partner
+                                    ),
+                                );
                             });
                         }
                     }
 
-                    // EA/Origin Support
-                    let is_ea = local_meta.as_ref().and_then(|m| m.metadata.custom_attributes.as_ref())
-                        .and_then(|attrs| attrs.get("ThirdPartyManagedApp"))
-                        .map(|a| a.value.to_lowercase().contains("origin") || a.value.to_lowercase().contains("ea app"))
-                        .unwrap_or(false);
-
-                    if is_ea {
+                    if ubisoft_partner || requires_uplay_launcher {
                         ui.group(|ui| {
-                            ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ EA/Origin title detected");
-                            if ui.button(egui::RichText::new("🚀 Launch via Origin/EA App").strong()).clicked() {
-                                let _ = app.tx.send(WorkerMsg::LaunchOrigin(app_name.clone()));
+                            ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ Ubisoft Connect required");
+                            if cfg!(target_os = "windows") {
+                                ui.label("Direct installation via Ubisoft Connect is recommended. Use Legendary activation for Ubisoft linking.");
+                            } else {
+                                ui.label("Ubisoft Connect in Wine/Lutris is recommended. Use Legendary activation flow to link Ubisoft.");
+                            }
+                            if ui.button("Open Ubisoft Account Link Page").clicked() {
+                                let _ = open::that("https://www.epicgames.com/id/link/ubisoft");
+                            }
+                            if ui.button("Open Ubisoft Activation Guide").clicked() {
+                                let _ = open::that("https://github.com/derrod/legendary/wiki/Ubisoft-Activation");
                             }
                         });
                     }
@@ -277,7 +319,8 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                             if ui.button("Accept").clicked() {
                                 let id = eula["key"].as_str().unwrap_or_default().to_string();
                                 let version = eula["version"].as_i64().unwrap_or(1) as i32;
-                                let _ = app.tx.send(WorkerMsg::AcceptEula { eula_id: id, version });
+                                let locale = eula["locale"].as_str().map(|s| s.to_string());
+                                let _ = app.tx.send(WorkerMsg::AcceptEula { eula_id: id, version, locale });
                                 // Remove from list
                                 app.unaccepted_eulas.retain(|e| e["key"] != eula["key"]);
                             }
