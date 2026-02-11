@@ -1,7 +1,7 @@
 use crate::app::LegendaryApp;
+use crate::config::CompatibilityTool;
 use crate::models::{SaveSyncStatus, View};
 use crate::worker::WorkerMsg;
-use crate::config::{CompatibilityTool};
 use eframe::egui;
 
 pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
@@ -77,30 +77,72 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                         }
                     }
 
-                    // Ubisoft Support
+                    let third_party_store = game
+                        .custom_attributes
+                        .as_ref()
+                        .and_then(|attrs| attrs.get("ThirdPartyManagedApp"))
+                        .map(|a| a.value.to_lowercase())
+                        .or_else(|| {
+                            local_meta
+                                .as_ref()
+                                .and_then(|m| m.metadata.custom_attributes.as_ref())
+                                .and_then(|attrs| attrs.get("ThirdPartyManagedApp"))
+                                .map(|a| a.value.to_lowercase())
+                        });
+                    let is_origin_game = third_party_store
+                        .as_deref()
+                        .map(|s| s == "origin" || s == "the ea app" || s.contains("origin") || s.contains("ea app"))
+                        .unwrap_or(false);
+
+                    if is_origin_game {
+                        ui.group(|ui| {
+                            ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ EA/Origin title detected");
+                            ui.label("Use Origin/EA App activation flow for this title (as in Legendary CLI --origin).");
+                            if ui.button(egui::RichText::new("🚀 Launch via Origin/EA App").strong()).clicked() {
+                                let _ = app.tx.send(WorkerMsg::LaunchOrigin(app_name.clone()));
+                            }
+                        });
+                    }
+
+                    let ubisoft_partner = game
+                        .partner_link_type
+                        .as_ref()
+                        .map(|p| p.eq_ignore_ascii_case("ubisoft"))
+                        .unwrap_or(false);
+                    let requires_uplay_launcher = app
+                        .installed_games
+                        .iter()
+                        .find(|g| g.app_name == app_name)
+                        .map(|g| g.executable.eq_ignore_ascii_case("UplayLaunch.exe"))
+                        .unwrap_or(false);
+
                     if let Some(partner) = &game.partner_link_type {
-                        if partner.to_lowercase() == "ubisoft" {
+                        if !partner.eq_ignore_ascii_case("ubisoft") {
                             ui.group(|ui| {
-                                ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ Ubisoft title detected");
-                                ui.label("This game requires activation on Ubisoft Connect.");
-                                if ui.button("Open Ubisoft Activation Guide").clicked() {
-                                    let _ = open::that("https://github.com/derrod/legendary/wiki/Ubisoft-Activation");
-                                }
+                                ui.colored_label(
+                                    egui::Color32::YELLOW,
+                                    format!(
+                                        "⚠ This game requires linking to '{}' and may not work yet.",
+                                        partner
+                                    ),
+                                );
                             });
                         }
                     }
 
-                    // EA/Origin Support
-                    let is_ea = local_meta.as_ref().and_then(|m| m.metadata.custom_attributes.as_ref())
-                        .and_then(|attrs| attrs.get("ThirdPartyManagedApp"))
-                        .map(|a| a.value.to_lowercase().contains("origin") || a.value.to_lowercase().contains("ea app"))
-                        .unwrap_or(false);
-
-                    if is_ea {
+                    if ubisoft_partner || requires_uplay_launcher {
                         ui.group(|ui| {
-                            ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ EA/Origin title detected");
-                            if ui.button(egui::RichText::new("🚀 Launch via Origin/EA App").strong()).clicked() {
-                                let _ = app.tx.send(WorkerMsg::LaunchOrigin(app_name.clone()));
+                            ui.colored_label(egui::Color32::LIGHT_BLUE, "ℹ Ubisoft Connect required");
+                            if cfg!(target_os = "windows") {
+                                ui.label("Direct installation via Ubisoft Connect is recommended. Use Legendary activation for Ubisoft linking.");
+                            } else {
+                                ui.label("Ubisoft Connect in Wine/Lutris is recommended. Use Legendary activation flow to link Ubisoft.");
+                            }
+                            if ui.button("Open Ubisoft Account Link Page").clicked() {
+                                let _ = open::that("https://www.epicgames.com/id/link/ubisoft");
+                            }
+                            if ui.button("Open Ubisoft Activation Guide").clicked() {
+                                let _ = open::that("https://github.com/derrod/legendary/wiki/Ubisoft-Activation");
                             }
                         });
                     }
@@ -230,34 +272,52 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                 });
             }
 
-            if let Some(meta) = &local_meta {
-                if let Some(dlcs) = &meta.metadata.dlc_item_list {
-                    if !dlcs.is_empty() {
-                        ui.add_space(10.0);
-                        ui.collapsing("DLCs", |ui| {
-                            for dlc in dlcs {
-                                ui.horizontal(|ui| {
-                                    ui.label(&dlc.title);
-                                    let dlc_installed = app.installed_games.iter().any(|g| g.app_name == dlc.id);
-                                    if dlc_installed {
-                                        ui.label("✅ Installed");
-                                        if ui.button("Uninstall").clicked() {
-                                            let _ = app.tx.send(WorkerMsg::UninstallGame(dlc.id.clone()));
-                                        }
-                                    } else {
-                                        if ui.button("Install").clicked() {
-                                            // We need to fetch install info for DLC first
-                                            let _ = app.tx.send(WorkerMsg::FetchInstallInfo {
-                                                app_name: dlc.id.clone(),
-                                                title: dlc.title.clone(),
-                                            });
-                                        }
-                                    }
+            let dlcs = if !game.dlc_item_list.is_empty() {
+                game.dlc_item_list.clone()
+            } else {
+                local_meta
+                    .as_ref()
+                    .and_then(|meta| meta.metadata.dlc_item_list.clone())
+                    .unwrap_or_default()
+            };
+            if !dlcs.is_empty() {
+                ui.add_space(10.0);
+                ui.collapsing("DLCs", |ui| {
+                    for dlc in dlcs {
+                        ui.horizontal(|ui| {
+                            ui.label(&dlc.title);
+                            let dlc_installed = app.installed_games.iter().any(|g| g.app_name == dlc.id);
+                            if dlc_installed {
+                                ui.label("✅ Installed");
+                                if ui.button("Verify").clicked() {
+                                    let catalog_item_id = app
+                                        .library
+                                        .iter()
+                                        .find(|i| i.app_name == dlc.id)
+                                        .map(|i| i.catalog_item_id.clone())
+                                        .unwrap_or_default();
+                                    let _ = app.tx.send(WorkerMsg::VerifyGame {
+                                        app_name: dlc.id.clone(),
+                                        catalog_item_id,
+                                    });
+                                    app.current_view = View::Tasks;
+                                }
+                                if ui.button("Repair").clicked() {
+                                    let _ = app.tx.send(WorkerMsg::RepairGame(dlc.id.clone(), false));
+                                    app.current_view = View::Tasks;
+                                }
+                                if ui.button("Uninstall").clicked() {
+                                    let _ = app.tx.send(WorkerMsg::UninstallGame(dlc.id.clone()));
+                                }
+                            } else if ui.button("Install").clicked() {
+                                let _ = app.tx.send(WorkerMsg::FetchInstallInfo {
+                                    app_name: dlc.id.clone(),
+                                    title: dlc.title.clone(),
                                 });
                             }
                         });
                     }
-                }
+                });
             }
 
             ui.separator();
@@ -276,7 +336,8 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                             if ui.button("Accept").clicked() {
                                 let id = eula["key"].as_str().unwrap_or_default().to_string();
                                 let version = eula["version"].as_i64().unwrap_or(1) as i32;
-                                let _ = app.tx.send(WorkerMsg::AcceptEula { eula_id: id, version });
+                                let locale = eula["locale"].as_str().map(|s| s.to_string());
+                                let _ = app.tx.send(WorkerMsg::AcceptEula { eula_id: id, version, locale });
                                 // Remove from list
                                 app.unaccepted_eulas.retain(|e| e["key"] != eula["key"]);
                             }
@@ -423,7 +484,7 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                     changed = true;
                 }
 
-                if ui.checkbox(&mut game_settings.proton_prefer_sdl, "Proton Prefer SDL (PROTON_PREFER_SDL=1)").changed() {
+                if ui.checkbox(&mut game_settings.proton_prefer_sdl, "Proton Prefer SDL").changed() {
                     changed = true;
                 }
 
@@ -615,6 +676,21 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                                     app_name: app_name.clone(),
                                     title: game.title.clone(),
                                 });
+                            }
+                            if ui.button("Import existing files").clicked() {
+                                let catalog_item_id = app
+                                    .library
+                                    .iter()
+                                    .find(|i| i.app_name == app_name)
+                                    .map(|i| i.catalog_item_id.clone())
+                                    .unwrap_or_default();
+                                let _ = app.tx.send(WorkerMsg::ImportGameFromPaths {
+                                    app_name: app_name.clone(),
+                                    title: game.title.clone(),
+                                    catalog_item_id,
+                                    search_paths: app.config.global.game_paths.clone(),
+                                });
+                                app.current_view = View::Tasks;
                             }
                             if ui.button(egui::RichText::new("Verify").size(24.0).strong()).clicked() {
                                 let catalog_item_id = app.library.iter().find(|i| i.app_name == app_name)

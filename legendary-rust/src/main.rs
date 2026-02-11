@@ -1,16 +1,16 @@
 mod api;
 mod app;
-mod worker;
-mod ui;
-mod utils;
 mod auth;
 mod config;
-mod models;
-mod manifest;
 mod download;
 mod eos;
+mod manifest;
+mod models;
 #[cfg(test)]
 mod tests;
+mod ui;
+mod utils;
+mod worker;
 
 use app::LegendaryApp;
 use eframe::egui;
@@ -38,6 +38,7 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         initial_window_size: Some(egui::vec2(800.0, 600.0)),
+        min_window_size: Some(egui::vec2(250.0, 250.0)),
         ..Default::default()
     };
 

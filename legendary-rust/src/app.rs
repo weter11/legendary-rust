@@ -8,9 +8,9 @@ use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
-use crate::config::{AppConfig};
+use crate::config::AppConfig;
 
-use std::sync::atomic::{AtomicBool};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 pub struct LegendaryApp {
@@ -61,7 +61,7 @@ impl LegendaryApp {
             cc.egui_ctx.clone(),
         );
 
-        Self {
+        let app = Self {
             token: None,
             library: Vec::new(),
             installed_games: crate::auth::load_installed_games(),
@@ -92,12 +92,17 @@ impl LegendaryApp {
             advanced_info: None,
             new_env_key: String::new(),
             new_env_val: String::new(),
-        }
+        };
+        let _ = app.tx.send(WorkerMsg::CheckForUpdates);
+        app
     }
 }
 
 impl eframe::App for LegendaryApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.style_mut(|style| {
+            style.wrap = Some(true);
+        });
         while let Ok(res) = self.rx.try_recv() {
             match res {
                 WorkerResponse::LoggedIn(token) => {
@@ -236,6 +241,9 @@ impl eframe::App for LegendaryApp {
                 WorkerResponse::AdvancedInfoFetched(info) => {
                     self.advanced_info = Some(info);
                 }
+                WorkerResponse::UpdateCheckResult(msg) => {
+                    self.status_message = msg;
+                }
             }
         }
 
@@ -293,7 +301,9 @@ impl eframe::App for LegendaryApp {
                 View::GameDetail => crate::ui::game_detail::show_game_detail_view(self, ui),
                 View::Settings => crate::ui::settings::show_settings_view(self, ui),
                 View::SaveSync => crate::ui::save_sync::show_save_sync_view(self, ui),
-                View::InstallDialog => crate::ui::install_dialog::show_install_dialog_view(self, ui),
+                View::InstallDialog => {
+                    crate::ui::install_dialog::show_install_dialog_view(self, ui)
+                }
                 View::Tasks => crate::ui::tasks::show_tasks_view(self, ui),
                 View::Account => crate::ui::account::show_account_view(self, ui),
                 View::EosOverlay => crate::ui::eos_overlay::show_eos_overlay_view(self, ui),
@@ -301,7 +311,7 @@ impl eframe::App for LegendaryApp {
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(&self.status_message);
+                    ui.add(egui::Label::new(&self.status_message).wrap(true));
                     if let Some(task) = &self.current_task {
                         if self.current_view != View::GameDetail {
                             ui.add(egui::ProgressBar::new(task.progress).show_percentage());

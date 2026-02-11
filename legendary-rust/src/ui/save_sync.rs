@@ -31,9 +31,7 @@ pub fn show_save_sync_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                 );
                 ui.label(err);
                 if ui.button("Retry").clicked() {
-                    if let Some(item) =
-                        app.library.iter().find(|i| i.app_name == status.app_name)
-                    {
+                    if let Some(item) = app.library.iter().find(|i| i.app_name == status.app_name) {
                         let save_path = app
                             .config
                             .games
@@ -87,8 +85,11 @@ pub fn show_save_sync_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
 
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal_top(|ui| {
-                let box_width =
-                    (ui.available_width() - ui.spacing().item_spacing.x * 2.0) / 3.0;
+                let available_width = ui.available_width();
+                let content_width = available_width * 0.8;
+                let side_padding = ((available_width - content_width) / 2.0).max(0.0);
+                ui.add_space(side_padding);
+                let box_width = (content_width - ui.spacing().item_spacing.x * 2.0) / 3.0;
                 let box_height = 250.0;
 
                 // Local Box
@@ -126,11 +127,8 @@ pub fn show_save_sync_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                                 .and_then(|s| s.save_path.clone());
                             if let Some(p) = current_save_path {
                                 ui.label(
-                                    egui::RichText::new(format!(
-                                        "Path: {}",
-                                        p.to_string_lossy()
-                                    ))
-                                    .small(),
+                                    egui::RichText::new(format!("Path: {}", p.to_string_lossy()))
+                                        .small(),
                                 );
                             } else if let Some(info) = &app.advanced_info {
                                 if info.app_name == status.app_name {
@@ -158,10 +156,8 @@ pub fn show_save_sync_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                                     let _ = app.config.save();
 
                                     // Refresh status
-                                    if let Some(item) = app
-                                        .library
-                                        .iter()
-                                        .find(|i| i.app_name == status.app_name)
+                                    if let Some(item) =
+                                        app.library.iter().find(|i| i.app_name == status.app_name)
                                     {
                                         let backup_path = app
                                             .advanced_info
@@ -190,45 +186,39 @@ pub fn show_save_sync_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                             ui.label(egui::RichText::new("🖴").size(80.0));
                             ui.add_space(10.0);
 
-                            ui.with_layout(
-                                egui::Layout::bottom_up(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .add_enabled(
-                                            can_upload,
-                                            egui::Button::new(
-                                                egui::RichText::new("Upload Local -> Cloud")
-                                                    .strong(),
-                                            ),
-                                        )
-                                        .clicked()
-                                    {
-                                        let save_path = app
-                                            .advanced_info
-                                            .as_ref()
-                                            .and_then(|i| i.save_path.clone())
-                                            .or_else(|| {
-                                                app.config
-                                                    .games
-                                                    .get(&status.app_name)
-                                                    .and_then(|s| s.save_path.clone())
-                                            });
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                                if ui
+                                    .add_enabled(
+                                        can_upload,
+                                        egui::Button::new(
+                                            egui::RichText::new("Upload Local -> Cloud").strong(),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    let save_path = app
+                                        .advanced_info
+                                        .as_ref()
+                                        .and_then(|i| i.save_path.clone())
+                                        .or_else(|| {
+                                            app.config
+                                                .games
+                                                .get(&status.app_name)
+                                                .and_then(|s| s.save_path.clone())
+                                        });
 
-                                        if let (Some(item), Some(sp)) = (
-                                            app.library
-                                                .iter()
-                                                .find(|i| i.app_name == status.app_name),
-                                            save_path,
-                                        ) {
-                                            let _ = app.tx.send(WorkerMsg::UploadCloudSave {
-                                                app_name: status.app_name.clone(),
-                                                namespace: item.namespace.clone(),
-                                                save_path: sp,
-                                            });
-                                        }
+                                    if let (Some(item), Some(sp)) = (
+                                        app.library.iter().find(|i| i.app_name == status.app_name),
+                                        save_path,
+                                    ) {
+                                        let _ = app.tx.send(WorkerMsg::UploadCloudSave {
+                                            app_name: status.app_name.clone(),
+                                            namespace: item.namespace.clone(),
+                                            save_path: sp,
+                                        });
                                     }
-                                },
-                            );
+                                }
+                            });
                         });
                     });
                 });
@@ -264,38 +254,32 @@ pub fn show_save_sync_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                             ui.label(egui::RichText::new("📦").size(80.0));
                             ui.add_space(20.0);
 
-                            ui.with_layout(
-                                egui::Layout::bottom_up(egui::Align::Center),
-                                |ui| {
-                                    let backup_path = app
-                                        .advanced_info
-                                        .as_ref()
-                                        .and_then(|i| i.backup_path.clone());
-                                    if ui
-                                        .add_enabled(
-                                            status.backup_time.is_some() && can_upload,
-                                            egui::Button::new(
-                                                egui::RichText::new("Upload Backup -> Cloud")
-                                                    .strong(),
-                                            ),
-                                        )
-                                        .clicked()
-                                    {
-                                        if let (Some(item), Some(bp)) = (
-                                            app.library
-                                                .iter()
-                                                .find(|i| i.app_name == status.app_name),
-                                            backup_path,
-                                        ) {
-                                            let _ = app.tx.send(WorkerMsg::UploadCloudSave {
-                                                app_name: status.app_name.clone(),
-                                                namespace: item.namespace.clone(),
-                                                save_path: bp,
-                                            });
-                                        }
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                                let backup_path = app
+                                    .advanced_info
+                                    .as_ref()
+                                    .and_then(|i| i.backup_path.clone());
+                                if ui
+                                    .add_enabled(
+                                        status.backup_time.is_some() && can_upload,
+                                        egui::Button::new(
+                                            egui::RichText::new("Upload Backup -> Cloud").strong(),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    if let (Some(item), Some(bp)) = (
+                                        app.library.iter().find(|i| i.app_name == status.app_name),
+                                        backup_path,
+                                    ) {
+                                        let _ = app.tx.send(WorkerMsg::UploadCloudSave {
+                                            app_name: status.app_name.clone(),
+                                            namespace: item.namespace.clone(),
+                                            save_path: bp,
+                                        });
                                     }
-                                },
-                            );
+                                }
+                            });
                         });
                     });
                 });
@@ -331,85 +315,75 @@ pub fn show_save_sync_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                             ui.label(egui::RichText::new("☁").size(80.0));
                             ui.add_space(20.0);
 
-                            ui.with_layout(
-                                egui::Layout::bottom_up(egui::Align::Center),
-                                |ui| {
-                                    ui.vertical(|ui| {
-                                        if ui
-                                            .add_enabled(
-                                                can_download,
-                                                egui::Button::new(
-                                                    egui::RichText::new(
-                                                        "Download Cloud -> Local",
-                                                    )
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                                ui.vertical(|ui| {
+                                    if ui
+                                        .add_enabled(
+                                            can_download,
+                                            egui::Button::new(
+                                                egui::RichText::new("Download Cloud -> Local")
                                                     .strong(),
-                                                ),
-                                            )
-                                            .clicked()
-                                        {
-                                            let save_path = app
-                                                .advanced_info
-                                                .as_ref()
-                                                .and_then(|i| i.save_path.clone())
-                                                .or_else(|| {
-                                                    app.config
-                                                        .games
-                                                        .get(&status.app_name)
-                                                        .and_then(|s| s.save_path.clone())
-                                                });
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        let save_path = app
+                                            .advanced_info
+                                            .as_ref()
+                                            .and_then(|i| i.save_path.clone())
+                                            .or_else(|| {
+                                                app.config
+                                                    .games
+                                                    .get(&status.app_name)
+                                                    .and_then(|s| s.save_path.clone())
+                                            });
 
-                                            if let (Some(item), Some(sp)) = (
-                                                app.library
-                                                    .iter()
-                                                    .find(|i| i.app_name == status.app_name),
-                                                save_path,
-                                            ) {
-                                                let _ = app.tx.send(
-                                                    WorkerMsg::DownloadCloudSave {
-                                                        app_name: status.app_name.clone(),
-                                                        namespace: item.namespace.clone(),
-                                                        save_path: sp,
-                                                    },
-                                                );
-                                            }
+                                        if let (Some(item), Some(sp)) = (
+                                            app.library
+                                                .iter()
+                                                .find(|i| i.app_name == status.app_name),
+                                            save_path,
+                                        ) {
+                                            let _ = app.tx.send(WorkerMsg::DownloadCloudSave {
+                                                app_name: status.app_name.clone(),
+                                                namespace: item.namespace.clone(),
+                                                save_path: sp,
+                                            });
                                         }
-                                        if ui
-                                            .add_enabled(
-                                                can_download,
-                                                egui::Button::new(
-                                                    egui::RichText::new(
-                                                        "Download Cloud -> Backup",
-                                                    )
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            can_download,
+                                            egui::Button::new(
+                                                egui::RichText::new("Download Cloud -> Backup")
                                                     .strong(),
-                                                ),
-                                            )
-                                            .clicked()
-                                        {
-                                            let backup_path = app
-                                                .advanced_info
-                                                .as_ref()
-                                                .and_then(|i| i.backup_path.clone());
-                                            if let (Some(item), Some(bp)) = (
-                                                app.library
-                                                    .iter()
-                                                    .find(|i| i.app_name == status.app_name),
-                                                backup_path,
-                                            ) {
-                                                let _ = app.tx.send(
-                                                    WorkerMsg::DownloadCloudSave {
-                                                        app_name: status.app_name.clone(),
-                                                        namespace: item.namespace.clone(),
-                                                        save_path: bp,
-                                                    },
-                                                );
-                                            }
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        let backup_path = app
+                                            .advanced_info
+                                            .as_ref()
+                                            .and_then(|i| i.backup_path.clone());
+                                        if let (Some(item), Some(bp)) = (
+                                            app.library
+                                                .iter()
+                                                .find(|i| i.app_name == status.app_name),
+                                            backup_path,
+                                        ) {
+                                            let _ = app.tx.send(WorkerMsg::DownloadCloudSave {
+                                                app_name: status.app_name.clone(),
+                                                namespace: item.namespace.clone(),
+                                                save_path: bp,
+                                            });
                                         }
-                                    });
-                                },
-                            );
+                                    }
+                                });
+                            });
                         });
                     });
                 });
+                ui.add_space(side_padding);
             });
         });
 
@@ -459,11 +433,7 @@ pub fn show_save_sync_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                 });
                 ui.add_space(10.0);
 
-                let game_settings = app
-                    .config
-                    .games
-                    .entry(status.app_name.clone())
-                    .or_default();
+                let game_settings = app.config.games.entry(status.app_name.clone()).or_default();
                 let mut changed = false;
 
                 ui.horizontal(|ui| {

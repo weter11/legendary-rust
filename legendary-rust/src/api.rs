@@ -1,6 +1,6 @@
 use crate::models::*;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use anyhow::Result;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde_json;
 use std::collections::HashMap;
 
@@ -13,8 +13,10 @@ const CATALOG_HOST: &str = "catalog-public-service-prod06.ol.epicgames.com";
 const ECOMMERCE_HOST: &str = "ecommerceintegration-public-service-ecomprod02.ol.epicgames.com";
 const DATASTORAGE_HOST: &str = "datastorage-public-service-liveegs.live.use1a.on.epicgames.com";
 const LIBRARY_HOST: &str = "library-service.live.use1a.on.epicgames.com";
+const LGD_API_HOST: &str = "api.legendary.gl";
 
-pub const UA_DEFAULT: &str = "UELauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit";
+pub const UA_DEFAULT: &str =
+    "UELauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit";
 pub const UA_EGS: &str = "EpicGamesLauncher/14.0.8-22004686+++Portal+Release-Live";
 
 pub fn get_ua_for_app(app_name: &str) -> &'static str {
@@ -59,7 +61,10 @@ impl EgsClient {
     pub fn get_auth_url() -> String {
         let user_basic = "34a02cf8f4414e29b15921876da36f9a";
         let login_url = "https://www.epicgames.com/id/login?redirectUrl=";
-        let redirect_url = format!("https://www.epicgames.com/id/api/redirect?clientId={}&responseType=code", user_basic);
+        let redirect_url = format!(
+            "https://www.epicgames.com/id/api/redirect?clientId={}&responseType=code",
+            user_basic
+        );
         format!("{}{}", login_url, urlencoding::encode(&redirect_url))
     }
 
@@ -84,7 +89,9 @@ impl EgsClient {
     fn do_auth(&mut self, params: &[(&str, &str)]) -> Result<OAuthToken> {
         let url = format!("https://{}/account/api/oauth/token", OAUTH_HOST);
 
-        let response = self.client.post(url)
+        let response = self
+            .client
+            .post(url)
             .basic_auth(&self.user_basic, Some(&self.pw_basic))
             .form(&params)
             .send()?;
@@ -110,7 +117,9 @@ impl EgsClient {
         let refresh_token = if let Some(token) = &self.token_info {
             // Check if expired (simplified: check if expires_at is in the past)
             if let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(&token.expires_at) {
-                if expires_at.with_timezone(&chrono::Utc) > chrono::Utc::now() + chrono::Duration::minutes(5) {
+                if expires_at.with_timezone(&chrono::Utc)
+                    > chrono::Utc::now() + chrono::Duration::minutes(5)
+                {
                     return Ok(());
                 }
             }
@@ -130,18 +139,30 @@ impl EgsClient {
     pub fn get_game_token(&mut self) -> Result<String> {
         self.refresh_if_needed()?;
         let url = format!("https://{}/account/api/oauth/exchange", OAUTH_HOST);
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
-        let response = self.client.get(url)
+        let response = self
+            .client
+            .get(url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to get game token: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to get game token: {}",
+                response.status()
+            ));
         }
 
         let json: serde_json::Value = response.json()?;
-        let code = json.get("code").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Code not found in response"))?;
+        let code = json
+            .get("code")
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Code not found in response"))?;
         Ok(code.to_string())
     }
 
@@ -158,7 +179,9 @@ impl EgsClient {
     }
 
     pub fn get_display_name(&self) -> Option<String> {
-        self.token_info.as_ref().and_then(|t| t.display_name.clone())
+        self.token_info
+            .as_ref()
+            .and_then(|t| t.display_name.clone())
     }
 
     pub fn get_library_items(&mut self) -> Result<Vec<LibraryItem>> {
@@ -167,13 +190,22 @@ impl EgsClient {
         let mut cursor = None;
 
         loop {
-            let mut url = format!("https://{}/library/api/public/items?includeMetadata=true", LIBRARY_HOST);
+            let mut url = format!(
+                "https://{}/library/api/public/items?includeMetadata=true",
+                LIBRARY_HOST
+            );
             if let Some(c) = &cursor {
                 url.push_str(&format!("&cursor={}", c));
             }
 
-            let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-            let response = self.client.get(&url)
+            let token = self
+                .token_info
+                .as_ref()
+                .map(|t| &t.access_token)
+                .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+            let response = self
+                .client
+                .get(&url)
                 .header(AUTHORIZATION, format!("bearer {}", token))
                 .send()?;
 
@@ -195,9 +227,18 @@ impl EgsClient {
 
     pub fn get_game_assets(&mut self, platform: &str) -> Result<Vec<Asset>> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://{}/launcher/api/public/assets/{}", LAUNCHER_HOST, platform);
-        let response = self.client.get(&url)
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let url = format!(
+            "https://{}/launcher/api/public/assets/{}",
+            LAUNCHER_HOST, platform
+        );
+        let response = self
+            .client
+            .get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
@@ -212,24 +253,43 @@ impl EgsClient {
         }
         let response = req.send()?;
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to download manifest: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to download manifest: {}",
+                response.status()
+            ));
         }
         Ok(response.bytes()?.to_vec())
     }
 
-    pub fn get_asset_manifest(&mut self, platform: &str, namespace: &str, catalog_item_id: &str, app_name: &str, label_name: &str) -> Result<serde_json::Value> {
+    pub fn get_asset_manifest(
+        &mut self,
+        platform: &str,
+        namespace: &str,
+        catalog_item_id: &str,
+        app_name: &str,
+        label_name: &str,
+    ) -> Result<serde_json::Value> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
         let url = format!("https://{}/launcher/api/public/assets/v2/platform/{}/namespace/{}/catalogItem/{}/app/{}/label/{}",
             LAUNCHER_HOST, platform, namespace, catalog_item_id, app_name, label_name);
 
-        let response = self.client.get(&url)
+        let response = self
+            .client
+            .get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .header(USER_AGENT, get_ua_for_app(app_name))
             .send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to fetch asset manifest info: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to fetch asset manifest info: {}",
+                response.status()
+            ));
         }
 
         let json: serde_json::Value = response.json()?;
@@ -238,29 +298,52 @@ impl EgsClient {
 
     pub fn get_game_info(&mut self, namespace: &str, catalog_item_id: &str) -> Result<GameInfo> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://{}/catalog/api/shared/namespace/{}/bulk/items", CATALOG_HOST, namespace);
-        let response = self.client.get(&url)
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let url = format!(
+            "https://{}/catalog/api/shared/namespace/{}/bulk/items",
+            CATALOG_HOST, namespace
+        );
+        let response = self
+            .client
+            .get(&url)
             .query(&[("id", catalog_item_id)])
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
         let j: serde_json::Value = response.json()?;
-        let info_val = j.get(catalog_item_id).ok_or_else(|| anyhow::anyhow!("Item not found"))?;
+        let info_val = j
+            .get(catalog_item_id)
+            .ok_or_else(|| anyhow::anyhow!("Item not found"))?;
         let info: GameInfo = serde_json::from_value(info_val.clone())?;
         Ok(info)
     }
 
-    pub fn get_cloud_save_metadata(&mut self, _namespace: &str, account_id: &str, app_id: &str) -> Result<Vec<CloudSaveFile>> {
+    pub fn get_cloud_save_metadata(
+        &mut self,
+        _namespace: &str,
+        account_id: &str,
+        app_id: &str,
+    ) -> Result<Vec<CloudSaveFile>> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref()
+        let token = self
+            .token_info
+            .as_ref()
             .map(|t| &t.access_token)
             .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
-        let url = format!("https://{}/api/v1/access/egstore/savesync/{}/{}/",
-            DATASTORAGE_HOST, account_id, app_id);
+        // Match Python Legendary behavior: request only manifest objects via /manifests/
+        let url = format!(
+            "https://{}/api/v1/access/egstore/savesync/{}/{}/manifests/",
+            DATASTORAGE_HOST, account_id, app_id
+        );
 
-        let response = self.client.get(&url)
+        let response = self
+            .client
+            .get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
@@ -272,7 +355,11 @@ impl EgsClient {
 
         if !status.is_success() {
             let err_text = response.text()?;
-            return Err(anyhow::anyhow!("Failed to fetch cloud saves: {} - {}", status, err_text));
+            return Err(anyhow::anyhow!(
+                "Failed to fetch cloud saves: {} - {}",
+                status,
+                err_text
+            ));
         }
 
         let body = response.text()?;
@@ -304,18 +391,35 @@ impl EgsClient {
         Ok(files)
     }
 
-    pub fn get_cloud_save_links(&mut self, account_id: &str, app_id: &str, filenames: &[String]) -> Result<HashMap<String, CloudSaveFile>> {
+    pub fn get_cloud_save_links(
+        &mut self,
+        account_id: &str,
+        app_id: &str,
+        filenames: &[String],
+    ) -> Result<HashMap<String, CloudSaveFile>> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
-        let url = format!("https://{}/api/v1/access/egstore/savesync/{}/{}/", DATASTORAGE_HOST, account_id, app_id);
-        let response = self.client.post(&url)
+        let url = format!(
+            "https://{}/api/v1/access/egstore/savesync/{}/{}/",
+            DATASTORAGE_HOST, account_id, app_id
+        );
+        let response = self
+            .client
+            .post(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .json(&serde_json::json!({"files": filenames}))
             .send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to get cloud save links: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to get cloud save links: {}",
+                response.status()
+            ));
         }
 
         let body = response.text()?;
@@ -324,82 +428,138 @@ impl EgsClient {
         Ok(save_response.files)
     }
 
-    pub fn download_cloud_file(&mut self, _namespace: &str, account_id: &str, app_id: &str, filename: &str) -> Result<Vec<u8>> {
+    pub fn download_cloud_file(
+        &mut self,
+        _namespace: &str,
+        account_id: &str,
+        app_id: &str,
+        filename: &str,
+    ) -> Result<Vec<u8>> {
         let links = self.get_cloud_save_links(account_id, app_id, &[filename.to_string()])?;
 
-        let file = links.get(filename)
+        let file = links
+            .get(filename)
             .ok_or_else(|| anyhow::anyhow!("File {} not found in metadata", filename))?;
 
-        let download_url = file.read_link.as_ref()
+        let download_url = file
+            .read_link
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No readLink provided for {}", filename))?;
 
         let response = self.client.get(download_url).send()?;
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to download cloud file: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to download cloud file: {}",
+                response.status()
+            ));
         }
 
         Ok(response.bytes()?.to_vec())
     }
 
-    pub fn upload_cloud_file(&mut self, _namespace: &str, account_id: &str, app_id: &str, filename: &str, data: Vec<u8>) -> Result<()> {
+    pub fn upload_cloud_file(
+        &mut self,
+        _namespace: &str,
+        account_id: &str,
+        app_id: &str,
+        filename: &str,
+        data: Vec<u8>,
+    ) -> Result<()> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
         // First get the upload URL
-        let url = format!("https://{}/api/v1/access/egstore/savesync/{}/{}/", DATASTORAGE_HOST, account_id, app_id);
-        let response = self.client.post(&url)
+        let url = format!(
+            "https://{}/api/v1/access/egstore/savesync/{}/{}/",
+            DATASTORAGE_HOST, account_id, app_id
+        );
+        let response = self
+            .client
+            .post(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .json(&serde_json::json!({"files": [filename]}))
             .send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to get upload URL: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to get upload URL: {}",
+                response.status()
+            ));
         }
 
         let body = response.text()?;
         let json: serde_json::Value = serde_json::from_str(&body)?;
         let response: CloudSaveResponse = serde_json::from_value(json)?;
 
-        let file = response.files.get(filename)
+        let file = response
+            .files
+            .get(filename)
             .ok_or_else(|| anyhow::anyhow!("File {} not found in metadata", filename))?;
 
-        let upload_url = file.write_link.as_ref()
+        let upload_url = file
+            .write_link
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No writeLink provided for {}", filename))?;
 
-        let response = self.client.put(upload_url)
-            .body(data)
-            .send()?;
+        let response = self.client.put(upload_url).body(data).send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to upload cloud file: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to upload cloud file: {}",
+                response.status()
+            ));
         }
 
         Ok(())
     }
 
     pub fn invalidate_session(&mut self) -> Result<()> {
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://{}/account/api/oauth/sessions/kill/{}", OAUTH_HOST, token);
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let url = format!(
+            "https://{}/account/api/oauth/sessions/kill/{}",
+            OAUTH_HOST, token
+        );
 
-        let response = self.client.delete(&url)
+        let response = self
+            .client
+            .delete(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to invalidate session: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to invalidate session: {}",
+                response.status()
+            ));
         }
 
         self.token_info = None;
         Ok(())
     }
 
-    pub fn get_ownership_token(&mut self, namespace: &str, catalog_item_id: &str) -> Result<Vec<u8>> {
+    pub fn get_ownership_token(
+        &mut self,
+        namespace: &str,
+        catalog_item_id: &str,
+    ) -> Result<Vec<u8>> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref()
+        let token = self
+            .token_info
+            .as_ref()
             .map(|t| &t.access_token)
             .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
-        let account_id = self.token_info.as_ref()
+        let account_id = self
+            .token_info
+            .as_ref()
             .map(|t| t.account_id.as_str())
             .ok_or_else(|| anyhow::anyhow!("No account ID"))?;
 
@@ -413,15 +573,19 @@ impl EgsClient {
         let mut form_data = std::collections::HashMap::new();
         form_data.insert("nsCatalogItemId", ns_catalog);
 
-        let response = self.client.post(&url)
+        let response = self
+            .client
+            .post(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .form(&form_data)
             .send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to get ownership token: {} - {}",
-                                       response.status(),
-                                       response.text().unwrap_or_default()));
+            return Err(anyhow::anyhow!(
+                "Failed to get ownership token: {} - {}",
+                response.status(),
+                response.text().unwrap_or_default()
+            ));
         }
 
         Ok(response.bytes()?.to_vec())
@@ -429,15 +593,27 @@ impl EgsClient {
 
     pub fn get_launcher_manifests(&mut self, platform: &str) -> Result<serde_json::Value> {
         self.refresh_if_needed()?;
-        let url = format!("https://{}/launcher/api/public/assets/v2/platform/{}/launcher", LAUNCHER_HOST, platform);
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let url = format!(
+            "https://{}/launcher/api/public/assets/v2/platform/{}/launcher",
+            LAUNCHER_HOST, platform
+        );
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
-        let response = self.client.get(url)
+        let response = self
+            .client
+            .get(url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to get launcher manifests: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to get launcher manifests: {}",
+                response.status()
+            ));
         }
 
         let json: serde_json::Value = response.json()?;
@@ -446,73 +622,118 @@ impl EgsClient {
 
     pub fn get_user_entitlements(&mut self) -> Result<Vec<Entitlement>> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
-        let url = format!("https://{}/entitlement/api/public/entitlements", ENTITLEMENT_HOST);
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let url = format!(
+            "https://{}/entitlement/api/public/entitlements",
+            ENTITLEMENT_HOST
+        );
 
-        let response = self.client.get(url)
+        let response = self
+            .client
+            .get(url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to get entitlements: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to get entitlements: {}",
+                response.status()
+            ));
         }
 
         let entitlements: Vec<Entitlement> = response.json()?;
         Ok(entitlements)
     }
 
-    pub fn get_download_ticket(&mut self, platform: &str, namespace: &str, catalog_item_id: &str, app_name: &str) -> Result<DownloadTicket> {
+    pub fn get_download_ticket(
+        &mut self,
+        platform: &str,
+        namespace: &str,
+        catalog_item_id: &str,
+        app_name: &str,
+    ) -> Result<DownloadTicket> {
         self.refresh_if_needed()?;
         let url = format!("https://{}/launcher/api/public/assets/v2/platform/{}/namespace/{}/catalogItem/{}/app/{}/downloadTicket", LAUNCHER_HOST, platform, namespace, catalog_item_id, app_name);
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
-        let response = self.client.get(&url)
+        let response = self
+            .client
+            .get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .header(USER_AGENT, get_ua_for_app(app_name))
             .send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to get download ticket: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to get download ticket: {}",
+                response.status()
+            ));
         }
 
         let ticket: DownloadTicket = response.json()?;
         Ok(ticket)
     }
 
-    pub fn get_game_manifest_by_ticket(&self, manifest_url: &str, app_name: Option<&str>) -> Result<Vec<u8>> {
+    pub fn get_game_manifest_by_ticket(
+        &self,
+        manifest_url: &str,
+        app_name: Option<&str>,
+    ) -> Result<Vec<u8>> {
         self.download_manifest(manifest_url, app_name)
     }
 
     pub fn start_session_with_sid(&mut self, sid: &str) -> Result<OAuthToken> {
-        let token = self.do_auth(&[
-            ("grant_type", "sid"),
-            ("sid", sid),
-            ("token_type", "eg1"),
-        ])?;
+        let token = self.do_auth(&[("grant_type", "sid"), ("sid", sid), ("token_type", "eg1")])?;
         Ok(token)
     }
 
     pub fn eula_get_status(&mut self, eula_id: &str) -> Result<Option<serde_json::Value>> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
         let account_id = self.get_account_id().unwrap_or_default();
-        let url = format!("https://{}/eulatracking/api/public/agreements/{}/account/{}", EULATRACKING_HOST, eula_id, account_id);
+        let url = format!(
+            "https://{}/eulatracking/api/public/agreements/{}/account/{}",
+            EULATRACKING_HOST, eula_id, account_id
+        );
 
-        let response = self.client.get(&url)
-            .query(&[("includeAll", "true")])
+        let response = self
+            .client
+            .get(&url)
+            .query(&[("locale", "en")])
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if response.status() == reqwest::StatusCode::NO_CONTENT
+            || response.status() == reqwest::StatusCode::NOT_FOUND
+        {
             return Ok(None);
         }
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to fetch EULA status: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to fetch EULA status: {}",
+                response.status()
+            ));
         }
 
         let json: serde_json::Value = response.json()?;
-        if json.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if json
+            .get("accepted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return Ok(None);
         }
         Ok(Some(json))
@@ -520,38 +741,102 @@ impl EgsClient {
 
     pub fn eula_accept(&mut self, eula_id: &str, version: i32, locale: Option<&str>) -> Result<()> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
         let account_id = self.get_account_id().unwrap_or_default();
-        let url = format!("https://{}/eulatracking/api/public/agreements/{}/version/{}/account/{}/accept", EULATRACKING_HOST, eula_id, version, account_id);
+        let url = format!(
+            "https://{}/eulatracking/api/public/agreements/{}/version/{}/account/{}/accept",
+            EULATRACKING_HOST, eula_id, version, account_id
+        );
 
-        let mut req = self.client.post(&url)
+        let mut req = self
+            .client
+            .post(&url)
             .header(AUTHORIZATION, format!("bearer {}", token));
 
-        if let Some(l) = locale {
-            req = req.query(&[("locale", l)]);
-        }
+        req = req.query(&[("locale", locale.unwrap_or("en"))]);
 
         let response = req.send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to accept EULA: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to accept EULA: {}",
+                response.status()
+            ));
         }
 
         Ok(())
     }
 
+    pub fn get_origin_uri(
+        &mut self,
+        app_name: &str,
+        user_name: &str,
+        locale: &str,
+        additional_args: Option<&str>,
+    ) -> Result<String> {
+        let token = self.get_game_token()?;
+        let account_id = self.get_account_id().unwrap_or_default();
+
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        serializer.append_pair("AUTH_PASSWORD", &token);
+        serializer.append_pair("AUTH_TYPE", "exchangecode");
+        serializer.append_pair("epicusername", user_name);
+        serializer.append_pair("epicuserid", &account_id);
+        serializer.append_pair("epiclocale", locale);
+
+        if let Some(extra) = additional_args {
+            for (k, v) in url::form_urlencoded::parse(extra.as_bytes()) {
+                serializer.append_pair(&k, &v);
+            }
+        }
+
+        Ok(format!(
+            "link2ea://launchgame/{}?{}",
+            app_name,
+            serializer.finish()
+        ))
+    }
+
+    pub fn get_legendary_version_info(&self) -> Result<serde_json::Value> {
+        let url = format!("https://{}/v1/version.json", LGD_API_HOST);
+        let response = self.client.get(url).send()?;
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to fetch Legendary version info: {}",
+                response.status()
+            ));
+        }
+        Ok(response.json()?)
+    }
+
     pub fn get_external_auths(&mut self) -> Result<serde_json::Value> {
         self.refresh_if_needed()?;
-        let token = self.token_info.as_ref().map(|t| &t.access_token).ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let token = self
+            .token_info
+            .as_ref()
+            .map(|t| &t.access_token)
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
         let account_id = self.get_account_id().unwrap_or_default();
-        let url = format!("https://{}/account/api/public/account/{}/externalAuths", OAUTH_HOST, account_id);
+        let url = format!(
+            "https://{}/account/api/public/account/{}/externalAuths",
+            OAUTH_HOST, account_id
+        );
 
-        let response = self.client.get(&url)
+        let response = self
+            .client
+            .get(&url)
             .header(AUTHORIZATION, format!("bearer {}", token))
             .send()?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to fetch external auths: {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to fetch external auths: {}",
+                response.status()
+            ));
         }
 
         let json: serde_json::Value = response.json()?;

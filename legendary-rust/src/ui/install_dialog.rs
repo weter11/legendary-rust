@@ -1,5 +1,5 @@
 use crate::app::LegendaryApp;
-use crate::models::{View};
+use crate::models::View;
 use crate::worker::WorkerMsg;
 use eframe::egui;
 
@@ -68,6 +68,26 @@ pub fn show_install_dialog_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                     install_path: info.install_path.clone(),
                     selected_tags: Some(app.selected_tags.clone()),
                     platform: "Windows".to_string(), // Default to Windows for now
+                });
+                app.current_view = View::Tasks;
+            }
+
+            if ui
+                .button("Import existing files (from configured paths)")
+                .clicked()
+            {
+                let catalog_item_id = app
+                    .library
+                    .iter()
+                    .find(|i| i.app_name == info.app_name)
+                    .map(|i| i.catalog_item_id.clone())
+                    .unwrap_or_default();
+                let search_paths = app.config.global.game_paths.clone();
+                let _ = app.tx.send(WorkerMsg::ImportGameFromPaths {
+                    app_name: info.app_name.clone(),
+                    title: info.title.clone(),
+                    catalog_item_id,
+                    search_paths,
                 });
                 app.current_view = View::Tasks;
             }
