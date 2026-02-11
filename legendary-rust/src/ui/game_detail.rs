@@ -289,6 +289,23 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                             let dlc_installed = app.installed_games.iter().any(|g| g.app_name == dlc.id);
                             if dlc_installed {
                                 ui.label("✅ Installed");
+                                if ui.button("Verify").clicked() {
+                                    let catalog_item_id = app
+                                        .library
+                                        .iter()
+                                        .find(|i| i.app_name == dlc.id)
+                                        .map(|i| i.catalog_item_id.clone())
+                                        .unwrap_or_default();
+                                    let _ = app.tx.send(WorkerMsg::VerifyGame {
+                                        app_name: dlc.id.clone(),
+                                        catalog_item_id,
+                                    });
+                                    app.current_view = View::Tasks;
+                                }
+                                if ui.button("Repair").clicked() {
+                                    let _ = app.tx.send(WorkerMsg::RepairGame(dlc.id.clone(), false));
+                                    app.current_view = View::Tasks;
+                                }
                                 if ui.button("Uninstall").clicked() {
                                     let _ = app.tx.send(WorkerMsg::UninstallGame(dlc.id.clone()));
                                 }
@@ -659,6 +676,21 @@ pub fn show_game_detail_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
                                     app_name: app_name.clone(),
                                     title: game.title.clone(),
                                 });
+                            }
+                            if ui.button("Import existing files").clicked() {
+                                let catalog_item_id = app
+                                    .library
+                                    .iter()
+                                    .find(|i| i.app_name == app_name)
+                                    .map(|i| i.catalog_item_id.clone())
+                                    .unwrap_or_default();
+                                let _ = app.tx.send(WorkerMsg::ImportGameFromPaths {
+                                    app_name: app_name.clone(),
+                                    title: game.title.clone(),
+                                    catalog_item_id,
+                                    search_paths: app.config.global.game_paths.clone(),
+                                });
+                                app.current_view = View::Tasks;
                             }
                             if ui.button(egui::RichText::new("Verify").size(24.0).strong()).clicked() {
                                 let catalog_item_id = app.library.iter().find(|i| i.app_name == app_name)

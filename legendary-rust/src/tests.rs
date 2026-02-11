@@ -14,7 +14,15 @@ mod tests {
         }"#;
         let item: LibraryItem = serde_json::from_str(json).unwrap();
         assert_eq!(item.app_name, "Anemone");
-        assert_eq!(item.metadata.unwrap().get("title").unwrap().as_str().unwrap(), "World of Goo");
+        assert_eq!(
+            item.metadata
+                .unwrap()
+                .get("title")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "World of Goo"
+        );
     }
 
     #[test]
@@ -86,6 +94,22 @@ mod tests {
         let attrs = meta.metadata.custom_attributes.unwrap();
         assert_eq!(attrs.get("CanRunOffline").unwrap().value, "true");
         assert_eq!(attrs.get("OwnershipToken").unwrap().value, "true");
+    }
+
+    #[test]
+    fn test_cloud_save_file_null_string_fields() {
+        let json = r#"{
+            "fileName": null,
+            "manifest_name": null,
+            "hash": null,
+            "lastModified": null,
+            "readLink": "https://example.com/read"
+        }"#;
+        let file: CloudSaveFile = serde_json::from_str(json).unwrap();
+        assert_eq!(file.file_name, "");
+        assert_eq!(file.hash, "");
+        assert!(file.last_modified.is_none());
+        assert_eq!(file.read_link.unwrap(), "https://example.com/read");
     }
 
     #[test]

@@ -61,7 +61,7 @@ impl LegendaryApp {
             cc.egui_ctx.clone(),
         );
 
-        Self {
+        let app = Self {
             token: None,
             library: Vec::new(),
             installed_games: crate::auth::load_installed_games(),
@@ -92,7 +92,9 @@ impl LegendaryApp {
             advanced_info: None,
             new_env_key: String::new(),
             new_env_val: String::new(),
-        }
+        };
+        let _ = app.tx.send(WorkerMsg::CheckForUpdates);
+        app
     }
 }
 
@@ -238,6 +240,9 @@ impl eframe::App for LegendaryApp {
                 }
                 WorkerResponse::AdvancedInfoFetched(info) => {
                     self.advanced_info = Some(info);
+                }
+                WorkerResponse::UpdateCheckResult(msg) => {
+                    self.status_message = msg;
                 }
             }
         }
