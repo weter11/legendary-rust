@@ -10,9 +10,6 @@ pub fn show_settings_view(app: &mut LegendaryApp, ui: &mut egui::Ui) {
     if ui.button("Sync with Epic Games Launcher").clicked() {
         let _ = app.tx.send(WorkerMsg::EglSync);
     }
-    if ui.button("Check for updates").clicked() {
-        let _ = app.tx.send(WorkerMsg::CheckForUpdates);
-    }
     ui.add_space(10.0);
 
     ui.group(|ui| {

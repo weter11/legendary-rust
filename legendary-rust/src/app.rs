@@ -93,16 +93,15 @@ impl LegendaryApp {
             new_env_key: String::new(),
             new_env_val: String::new(),
         };
-        let _ = app.tx.send(WorkerMsg::CheckForUpdates);
         app
     }
 }
 
 impl eframe::App for LegendaryApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.style_mut(|style| {
-            style.wrap = Some(true);
-        });
+        let mut style = (*ctx.style()).clone();
+        style.wrap = Some(true);
+        ctx.set_style(style);
         while let Ok(res) = self.rx.try_recv() {
             match res {
                 WorkerResponse::LoggedIn(token) => {
@@ -240,9 +239,6 @@ impl eframe::App for LegendaryApp {
                 }
                 WorkerResponse::AdvancedInfoFetched(info) => {
                     self.advanced_info = Some(info);
-                }
-                WorkerResponse::UpdateCheckResult(msg) => {
-                    self.status_message = msg;
                 }
             }
         }

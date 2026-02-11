@@ -61,8 +61,7 @@ If you always want to have the latest features and fixes available then using th
 
 ### Prebuilt Standalone Binary (Windows, macOS, and Linux)
 
-Download the `legendary` or `legendary.exe` binary from [the latest release](https://github.com/derrod/legendary/releases/latest)
-and move it to somewhere in your `$PATH`/`%PATH%`. Don't forget to `chmod +x` it on Linux/macOS.
+*Releases will be available soon.*
 
 The Windows .exe and Linux/macOS executable were created with PyInstaller and will run standalone even without python being installed.
 Note that on Linux glibc >= 2.25 is required, so older distributions such as Ubuntu 16.04 or Debian stretch will not work.

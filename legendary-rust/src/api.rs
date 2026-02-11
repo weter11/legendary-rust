@@ -13,7 +13,6 @@ const CATALOG_HOST: &str = "catalog-public-service-prod06.ol.epicgames.com";
 const ECOMMERCE_HOST: &str = "ecommerceintegration-public-service-ecomprod02.ol.epicgames.com";
 const DATASTORAGE_HOST: &str = "datastorage-public-service-liveegs.live.use1a.on.epicgames.com";
 const LIBRARY_HOST: &str = "library-service.live.use1a.on.epicgames.com";
-const LGD_API_HOST: &str = "api.legendary.gl";
 
 pub const UA_DEFAULT: &str =
     "UELauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit";
@@ -799,18 +798,6 @@ impl EgsClient {
             app_name,
             serializer.finish()
         ))
-    }
-
-    pub fn get_legendary_version_info(&self) -> Result<serde_json::Value> {
-        let url = format!("https://{}/v1/version.json", LGD_API_HOST);
-        let response = self.client.get(url).send()?;
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Failed to fetch Legendary version info: {}",
-                response.status()
-            ));
-        }
-        Ok(response.json()?)
     }
 
     pub fn get_external_auths(&mut self) -> Result<serde_json::Value> {
